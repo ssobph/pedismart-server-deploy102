@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: ecoride-server
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGO_URI
+        fromDatabase:
+          name: ecoride-db
+          property: connectionString
+      - key: ACCESS_TOKEN_SECRET
+        generateValue: true
+      - key: ACCESS_TOKEN_EXPIRY
+        value: 4d
+      - key: REFRESH_TOKEN_SECRET
+        generateValue: true
+      - key: REFRESH_TOKEN_EXPIRY
+        value: 30d
+      - key: GOOGLE_MAPS_API_KEY
+        value: AIzaSyAJEayMulsZ_LDps2fKN22Q-ED2f3BwGIw
+      - key: EMAIL_SERVICE
+        value: gmail
+      - key: EMAIL_USER
+        value: bascecoride@gmail.com
+      - key: EMAIL_PASSWORD
+        value: fqda dgxc khfv jjov
+      - key: CLOUDINARY_API_NAME
+        value: dqjrmcagt
+      - key: CLOUDINARY_API_KEY
+        value: 369516174895262
+      - key: CLOUDINARY_SECRET_KEY
+        value: rHEA47fQ0PwcovW57fssoRKeIKI
+      - key: CLOUDINARY_URL
+        value: cloudinary://369516174895262:rHEA47fQ0PwcovW57fssoRKeIKI@dqjrmcagt
+
+databases:
+  - name: ecoride-db
+    plan: free

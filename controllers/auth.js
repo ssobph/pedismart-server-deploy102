@@ -1,0 +1,651 @@
+import User from "../models/User.js";
+import { StatusCodes } from "http-status-codes";
+import { BadRequestError, UnauthenticatedError } from "../errors/index.js";
+import jwt from "jsonwebtoken";
+import { generateVerificationCode, sendVerificationEmail } from "../utils/emailService.js";
+import { upload } from "../utils/cloudinary.js";
+
+// Simple test endpoint
+export const testAuth = async (req, res) => {
+  res.status(StatusCodes.OK).json({ message: "Auth endpoint is working" });
+};
+
+// Login with email and password
+export const login = async (req, res) => {
+  const { email, password, role } = req.body;
+
+  console.log("Login attempt:", { email, role }); // Log login attempt details
+
+  if (!email || !password) {
+    throw new BadRequestError("Please provide email and password");
+  }
+
+  if (!role || !["customer", "rider", "admin"].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer, rider, or admin)");
+  }
+
+  try {
+    // Find user without role restriction first to debug
+    const anyUser = await User.findOne({ email });
+    console.log("User found with this email:", anyUser ? "Yes" : "No");
+    if (anyUser) {
+      console.log("User role:", anyUser.role, "Requested role:", role);
+    }
+
+    const user = await User.findOne({ email, role });
+    
+    if (!user) {
+      console.log("User not found with email and role combination");
+      throw new UnauthenticatedError("Invalid credentials");
+    }
+
+    console.log("User found, checking password");
+    const isPasswordCorrect = await user.comparePassword(password);
+    if (!isPasswordCorrect) {
+      console.log("Password incorrect");
+      throw new UnauthenticatedError("Invalid credentials");
+    }
+
+    // Check if user is approved (skip for admin users)
+    if (role !== 'admin') {
+      if (user.status === "disapproved") {
+        console.log("User is disapproved");
+        return res.status(StatusCodes.FORBIDDEN).json({
+          message: "Your account has been disapproved. Please contact support for assistance.",
+          status: "disapproved",
+          isApproved: false
+        });
+      } else if (user.status === "pending") {
+        console.log("User is pending approval");
+        return res.status(StatusCodes.FORBIDDEN).json({
+          message: "Your account is pending approval. Please wait for an administrator to approve your account.",
+          status: "pending",
+          isApproved: false
+        });
+      }
+    }
+
+    console.log("Password correct, generating tokens");
+    const accessToken = user.createAccessToken();
+    const refreshToken = user.createRefreshToken();
+
+    return res.status(StatusCodes.OK).json({
+      message: "User logged in successfully",
+      user,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+// Register a new user
+export const register = async (req, res) => {
+  const { 
+    email, 
+    password, 
+    role, 
+    firstName, 
+    middleName, 
+    lastName, 
+    phone, 
+    schoolId,
+    licenseId,
+    sex,
+    userRole,
+    photo,
+    schoolIdDocument,
+    staffFacultyIdDocument,
+    cor,
+    driverLicense,
+    vehicleType
+  } = req.body;
+
+  if (!email || !password) {
+    throw new BadRequestError("Please provide email and password");
+  }
+
+  if (!role || !["customer", "rider"].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer or rider)");
+  }
+
+  try {
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      throw new BadRequestError("Email already in use");
+    }
+
+    // Format licenseId if provided and user is a rider
+    let formattedLicenseId = licenseId;
+    if (role === "rider" && licenseId) {
+      formattedLicenseId = licenseId.trim().toUpperCase();
+      
+      // Basic validation for license ID format
+      if (formattedLicenseId.length < 4) {
+        throw new BadRequestError("License ID must be at least 4 characters");
+      }
+    }
+
+    // Validate required documents based on role and userRole
+    if (userRole) {
+      if (!photo) {
+        throw new BadRequestError("Photo is required for verification");
+      }
+      
+      if (userRole === "Student") {
+        if (!schoolIdDocument || !cor) {
+          throw new BadRequestError("School ID and COR are required for students");
+        }
+        if (role === "rider" && !driverLicense) {
+          throw new BadRequestError("Driver license is required for student drivers");
+        }
+      } else if (userRole === "Faculty" || userRole === "Staff") {
+        if (!staffFacultyIdDocument) {
+          throw new BadRequestError("Staff/Faculty ID is required for faculty and staff");
+        }
+        if (role === "rider" && !driverLicense) {
+          throw new BadRequestError("Driver license is required for faculty/staff drivers");
+        }
+      }
+    }
+
+    // Create new user
+    const user = new User({
+      email,
+      password,
+      role,
+      firstName,
+      middleName,
+      lastName,
+      phone,
+      schoolId,
+      licenseId: formattedLicenseId,
+      sex,
+      userRole,
+      photo,
+      schoolIdDocument,
+      staffFacultyIdDocument,
+      cor,
+      driverLicense,
+      vehicleType,
+      approved: false, // Ensure all new users start as unapproved
+      status: "pending"
+    });
+
+    await user.save();
+
+    // Generate tokens but inform user that approval is pending
+    const accessToken = user.createAccessToken();
+    const refreshToken = user.createRefreshToken();
+
+    res.status(StatusCodes.CREATED).json({
+      message: "User registered successfully. Your account is pending approval.",
+      user,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      isApproved: false,
+      status: "pending"
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+// Legacy phone-based authentication (keeping for backward compatibility)
+export const auth = async (req, res) => {
+  const { phone, role } = req.body;
+
+  if (!phone) {
+    throw new BadRequestError("Phone number is required");
+  }
+
+  if (!role || !["customer", "rider"].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer or rider)");
+  }
+
+  try {
+    let user = await User.findOne({ phone });
+
+    if (user) {
+      if (user.role !== role) {
+        throw new BadRequestError("Phone number and role do not match");
+      }
+
+      // Check if user is approved
+      if (user.status === "disapproved") {
+        console.log("User is disapproved");
+        return res.status(StatusCodes.FORBIDDEN).json({
+          message: "Your account has been disapproved. Please contact support for assistance.",
+          status: "disapproved",
+          isApproved: false
+        });
+      } else if (user.status === "pending") {
+        console.log("User is pending approval");
+        return res.status(StatusCodes.FORBIDDEN).json({
+          message: "Your account is pending approval. Please wait for an administrator to approve your account.",
+          status: "pending",
+          isApproved: false
+        });
+      }
+
+      const accessToken = user.createAccessToken();
+      const refreshToken = user.createRefreshToken();
+
+      return res.status(StatusCodes.OK).json({
+        message: "User logged in successfully",
+        user,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+    }
+
+    user = new User({
+      phone,
+      role,
+      // Set a temporary email and password for legacy users
+      email: `${phone}@temp.ecoride.com`,
+      password: Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-8),
+      // Set approved to false by default
+      approved: false,
+      status: "pending"
+    });
+
+    await user.save();
+
+    // Return pending status for new users
+    return res.status(StatusCodes.FORBIDDEN).json({
+      message: "Account pending approval",
+      status: "pending",
+      isApproved: false,
+      user: {
+        _id: user._id,
+        phone: user.phone,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+export const refreshToken = async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) {
+    throw new BadRequestError("Refresh token is required");
+  }
+
+  try {
+    const payload = jwt.verify(refresh_token, process.env.REFRESH_TOKEN_SECRET);
+    const user = await User.findById(payload.id);
+
+    if (!user) {
+      throw new UnauthenticatedError("Invalid refresh token");
+    }
+
+    const newAccessToken = user.createAccessToken();
+    const newRefreshToken = user.createRefreshToken();
+
+    res.status(StatusCodes.OK).json({
+      access_token: newAccessToken,
+      refresh_token: newRefreshToken,
+    });
+  } catch (error) {
+    console.error(error);
+    throw new UnauthenticatedError("Invalid refresh token");
+  }
+};
+
+// Get user profile information
+export const getUserProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    
+    if (!user) {
+      throw new UnauthenticatedError("User not found");
+    }
+
+    res.status(StatusCodes.OK).json({
+      user
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+// Update user profile information
+export const updateUserProfile = async (req, res) => {
+  const { firstName, middleName, lastName, phone, schoolId, licenseId, email, sex } = req.body;
+
+  try {
+    const user = await User.findById(req.user.id);
+    
+    if (!user) {
+      throw new UnauthenticatedError("User not found");
+    }
+
+    // Update fields if provided
+    if (firstName) user.firstName = firstName;
+    if (middleName !== undefined) user.middleName = middleName;
+    if (lastName) user.lastName = lastName;
+    if (phone) user.phone = phone;
+    if (schoolId !== undefined) user.schoolId = schoolId;
+    
+    // Format and validate licenseId if provided and user is a rider
+    if (licenseId !== undefined) {
+      if (user.role === "rider" && licenseId) {
+        const formattedLicenseId = licenseId.trim().toUpperCase();
+        
+        // Basic validation for license ID format
+        if (formattedLicenseId.length < 4) {
+          throw new BadRequestError("License ID must be at least 4 characters");
+        }
+        
+        user.licenseId = formattedLicenseId;
+      } else {
+        user.licenseId = licenseId;
+      }
+    }
+    
+    if (sex) user.sex = sex;
+    if (email) {
+      // Check if email is already in use by another user
+      const existingUser = await User.findOne({ email, _id: { $ne: req.user.id } });
+      if (existingUser) {
+        throw new BadRequestError("Email already in use");
+      }
+      user.email = email;
+    }
+
+    await user.save();
+
+    // Return updated user without password
+    const updatedUser = await User.findById(req.user.id).select('-password');
+
+    res.status(StatusCodes.OK).json({
+      message: "Profile updated successfully",
+      user: updatedUser
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+// Send password reset verification code
+export const forgotPassword = async (req, res) => {
+  const { email, role } = req.body;
+
+  if (!email || !role) {
+    throw new BadRequestError("Please provide email and role");
+  }
+
+  if (!['customer', 'rider'].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer or rider)");
+  }
+
+  try {
+    // Find user by email and role
+    const user = await User.findOne({ email, role });
+    
+    if (!user) {
+      // Don't reveal if user exists or not for security
+      return res.status(StatusCodes.OK).json({
+        message: "If an account with this email exists, a verification code has been sent."
+      });
+    }
+
+    // Generate verification code
+    const verificationCode = generateVerificationCode();
+    const expirationTime = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Save verification code to user
+    user.resetPasswordCode = verificationCode;
+    user.resetPasswordExpires = expirationTime;
+    await user.save();
+
+    // Send verification email
+    const emailSent = await sendVerificationEmail(email, verificationCode);
+    
+    if (!emailSent) {
+      throw new Error("Failed to send verification email");
+    }
+
+    console.log(`Password reset code sent to ${email}`);
+    
+    res.status(StatusCodes.OK).json({
+      message: "Verification code sent to your email address"
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    throw new BadRequestError("Failed to process password reset request");
+  }
+};
+
+// Verify reset code without updating password
+export const verifyCode = async (req, res) => {
+  const { email, role, verificationCode } = req.body;
+
+  if (!email || !role || !verificationCode) {
+    throw new BadRequestError("All fields are required");
+  }
+
+  if (!['customer', 'rider'].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer or rider)");
+  }
+
+  try {
+    // Find user by email and role
+    const user = await User.findOne({ email, role });
+    
+    if (!user) {
+      throw new BadRequestError("Invalid verification code or user not found");
+    }
+
+    // Check if verification code is valid and not expired
+    console.log("Verification code validation:");
+    console.log(`Stored code: ${user.resetPasswordCode} ${typeof user.resetPasswordCode}`);
+    console.log(`Received code: ${verificationCode} ${typeof verificationCode}`);
+    console.log(`Match? ${user.resetPasswordCode === verificationCode}`);
+    
+    if (!user.resetPasswordCode || user.resetPasswordCode !== verificationCode) {
+      throw new BadRequestError("Invalid verification code");
+    }
+
+    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      throw new BadRequestError("Verification code has expired");
+    }
+
+    // Code is valid, but we don't reset the password or clear the code yet
+    console.log(`Verification code valid for ${email}`);
+    
+    res.status(StatusCodes.OK).json({
+      message: "Verification code is valid"
+    });
+  } catch (error) {
+    console.error('Verify code error:', error);
+    if (error instanceof BadRequestError) {
+      throw error;
+    }
+    throw new BadRequestError("Failed to verify code");
+  }
+};
+
+// Verify reset code and update password
+export const resetPassword = async (req, res) => {
+  const { email, role, verificationCode, newPassword, confirmPassword } = req.body;
+
+  if (!email || !role || !verificationCode || !newPassword || !confirmPassword) {
+    throw new BadRequestError("All fields are required");
+  }
+
+  if (!['customer', 'rider'].includes(role)) {
+    throw new BadRequestError("Valid role is required (customer or rider)");
+  }
+
+  if (newPassword !== confirmPassword) {
+    throw new BadRequestError("Passwords do not match");
+  }
+
+  // Password validation
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+  if (!passwordRegex.test(newPassword)) {
+    throw new BadRequestError(
+      "Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special character"
+    );
+  }
+
+  try {
+    // Find user by email and role
+    const user = await User.findOne({ email, role });
+    
+    if (!user) {
+      throw new BadRequestError("Invalid verification code or user not found");
+    }
+
+    // Check if verification code is valid and not expired
+    if (!user.resetPasswordCode || user.resetPasswordCode !== verificationCode) {
+      throw new BadRequestError("Invalid verification code");
+    }
+
+    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      throw new BadRequestError("Verification code has expired");
+    }
+
+    // Update password
+    user.password = newPassword;
+    user.resetPasswordCode = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    console.log(`Password reset successful for ${email}`);
+    
+    res.status(StatusCodes.OK).json({
+      message: "Password reset successful. You can now login with your new password."
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    if (error instanceof BadRequestError) {
+      throw error;
+    }
+    throw new BadRequestError("Failed to reset password");
+  }
+};
+
+// Upload documents for verification
+export const uploadDocuments = async (req, res) => {
+  try {
+    console.log('\n==== DOCUMENT UPLOAD REQUEST ====');
+    console.log('Request body:', req.body);
+    const { userRole, role } = req.body;
+    const files = req.files;
+
+    console.log('Upload documents request:', { userRole, role });
+    console.log('Files received:', files ? Object.keys(files) : 'No files');
+    
+    // Log the environment variables for Cloudinary (without revealing secrets)
+    console.log('Cloudinary Environment Variables:', {
+      CLOUDINARY_API_NAME: process.env.CLOUDINARY_API_NAME ? 'Set' : 'Not set',
+      CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY ? 'Set' : 'Not set',
+      CLOUDINARY_SECRET_KEY: process.env.CLOUDINARY_SECRET_KEY ? 'Set' : 'Not set',
+    });
+
+    if (!userRole || !role) {
+      throw new BadRequestError("User role and account role are required");
+    }
+
+    if (!files || Object.keys(files).length === 0) {
+      throw new BadRequestError("No files uploaded");
+    }
+
+    // Validate required documents based on role
+    const requiredDocs = [];
+    
+    // Photo is always required
+    requiredDocs.push('photo');
+    
+    if (userRole === 'Student') {
+      requiredDocs.push('schoolIdDocument', 'cor');
+      if (role === 'rider') {
+        requiredDocs.push('driverLicense');
+      }
+    } else if (userRole === 'Faculty' || userRole === 'Staff') {
+      requiredDocs.push('staffFacultyIdDocument');
+      if (role === 'rider') {
+        requiredDocs.push('driverLicense');
+      }
+    }
+
+    console.log('Required documents:', requiredDocs);
+
+    // Check if all required documents are uploaded
+    const missingDocs = [];
+    for (const doc of requiredDocs) {
+      if (!files[doc]) {
+        missingDocs.push(doc);
+      }
+    }
+
+    if (missingDocs.length > 0) {
+      throw new BadRequestError(`Missing required documents: ${missingDocs.join(', ')} for ${userRole} ${role}`);
+    }
+
+    // Log file details for debugging
+    for (const [key, fileArray] of Object.entries(files)) {
+      if (fileArray && fileArray[0]) {
+        console.log(`File details for ${key}:`, {
+          filename: fileArray[0].originalname || fileArray[0].name,
+          mimetype: fileArray[0].mimetype,
+          size: fileArray[0].size,
+          fieldname: fileArray[0].fieldname
+        });
+      }
+    }
+
+    // Prepare document URLs
+    const documentUrls = {};
+    for (const [key, fileArray] of Object.entries(files)) {
+      if (fileArray && fileArray[0]) {
+        // Check if path exists (Cloudinary storage) or use the file directly (memory storage)
+        if (fileArray[0].path) {
+          documentUrls[key] = fileArray[0].path;
+          console.log(`Document uploaded to Cloudinary: ${key} -> ${fileArray[0].path}`);
+        } else {
+          // For memory storage fallback, we'd need to handle file upload differently
+          // This is a placeholder for now
+          console.log(`Document in memory storage: ${key}`);
+          documentUrls[key] = `memory-storage-${key}`;
+        }
+      }
+    }
+
+    console.log('Document URLs prepared:', Object.keys(documentUrls));
+    console.log('==== END DOCUMENT UPLOAD REQUEST ====\n');
+
+    res.status(StatusCodes.OK).json({
+      message: "Documents uploaded successfully",
+      documents: documentUrls
+    });
+  } catch (error) {
+    console.error('\n==== DOCUMENT UPLOAD ERROR ====');
+    console.error('Upload documents error:', error);
+    console.error('Error stack:', error.stack);
+    console.error('==== END DOCUMENT UPLOAD ERROR ====\n');
+    
+    if (error instanceof BadRequestError) {
+      throw error;
+    }
+    
+    // Provide more specific error message if possible
+    if (error.message && error.message.includes('Cloudinary')) {
+      throw new BadRequestError(`Cloudinary error: ${error.message}`);
+    }
+    
+    throw new BadRequestError("Failed to upload documents: " + (error.message || 'Unknown error'));
+  }
+};
