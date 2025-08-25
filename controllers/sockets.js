@@ -29,14 +29,22 @@ const handleSocketConnection = (io) => {
     console.log(`User Joined: ${user.id} (${user.role})`);
 
     if (user.role === "rider") {
-      socket.on("goOnDuty", (coords) => {
+      socket.on("goOnDuty", async (coords) => {
+        // Get rider's vehicle type from database
+        const riderInfo = await User.findById(user.id).select("vehicleType");
+        
+        console.log(`Rider ${user.id} going on duty with coords:`, coords);
+        console.log(`Rider ${user.id} vehicle type:`, riderInfo?.vehicleType);
+        
         onDutyRiders.set(user.id, { 
           socketId: socket.id, 
           coords,
-          riderId: user.id 
+          riderId: user.id,
+          vehicleType: riderInfo?.vehicleType || "Tricycle" // Store vehicle type
         });
         socket.join("onDuty");
-        console.log(`rider ${user.id} is now on duty.`);
+        console.log(`rider ${user.id} is now on duty with vehicle: ${riderInfo?.vehicleType || "Tricycle"}.`);
+        console.log(`Total on-duty riders: ${onDutyRiders.size}`);
         updateNearbyriders();
       });
 
@@ -62,6 +70,7 @@ const handleSocketConnection = (io) => {
 
     if (user.role === "customer") {
       socket.on("subscribeToZone", (customerCoords) => {
+        console.log(`Customer ${user.id} subscribing to zone with coords:`, customerCoords);
         socket.user.coords = customerCoords;
         sendNearbyRiders(socket, customerCoords);
       });
@@ -86,6 +95,10 @@ const handleSocketConnection = (io) => {
           const sumRatings = ratings.reduce((sum, rating) => sum + rating.rating, 0);
           const averageRating = totalRatings > 0 ? (sumRatings / totalRatings).toFixed(1) : "0.0";
           
+          // Get vehicle type from onDuty data or database
+          const driverDetails = await User.findById(riderId).select("vehicleType");
+          const vehicleType = onDutyRiders.get(riderId)?.vehicleType || driverDetails?.vehicleType || "Tricycle";
+          
           // Send driver details back to the customer
           socket.emit("driverDetailsResponse", {
             _id: driver._id,
@@ -95,7 +108,7 @@ const handleSocketConnection = (io) => {
             licenseId: driver.licenseId,
             averageRating: averageRating,
             totalRatings: totalRatings,
-            vehicleType: onDutyRiders.get(riderId)?.vehicleType || "auto" // Get vehicle type from onDuty data
+            vehicleType: vehicleType
           });
           
           console.log(`Sent driver ${riderId} details to customer ${user.id}`);
@@ -192,6 +205,10 @@ const handleSocketConnection = (io) => {
 
     async function sendNearbyRiders(socket, location, ride = null) {
       try {
+        console.log('sendNearbyRiders called with location:', location);
+        console.log('onDutyRiders size:', onDutyRiders.size);
+        console.log('onDutyRiders entries:', Array.from(onDutyRiders.entries()));
+        
         const nearbyRidersArray = Array.from(onDutyRiders.entries()).map(
           async ([riderId, riderData]) => {
             // Get basic rider info from database for each nearby rider
@@ -199,21 +216,26 @@ const handleSocketConnection = (io) => {
               "firstName lastName vehicleType"
             );
             
+            const distance = geolib.getDistance(riderData.coords, location);
+            console.log(`Rider ${riderId} distance: ${distance}m`);
+            
             return {
               ...riderData,
               riderId,
-              distance: geolib.getDistance(riderData.coords, location),
-              vehicleType: riderInfo?.vehicleType || "auto",
+              distance: distance,
+              vehicleType: riderData.vehicleType || riderInfo?.vehicleType || "Tricycle", // Use stored vehicleType first
             };
           }
         );
 
         const resolvedRiders = await Promise.all(nearbyRidersArray);
+        console.log('Resolved riders before filtering:', resolvedRiders);
         
         const nearbyriders = resolvedRiders
           .filter((rider) => rider.distance <= 60000)
           .sort((a, b) => a.distance - b.distance);
 
+        console.log('Nearby riders after filtering:', nearbyriders);
         socket.emit("nearbyriders", nearbyriders);
 
         if (ride) {

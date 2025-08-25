@@ -155,10 +155,9 @@ export const getRideStats = async (req, res) => {
 
     // Format vehicle stats
     const formattedVehicleStats = {
-      bike: { count: 0, totalFare: 0, totalDistance: 0 },
-      auto: { count: 0, totalFare: 0, totalDistance: 0 },
-      cabEconomy: { count: 0, totalFare: 0, totalDistance: 0 },
-      cabPremium: { count: 0, totalFare: 0, totalDistance: 0 }
+      "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 },
+      "Tricycle": { count: 0, totalFare: 0, totalDistance: 0 },
+      "Cab": { count: 0, totalFare: 0, totalDistance: 0 }
     };
 
     vehicleStats.forEach(stat => {
@@ -344,10 +343,9 @@ export const getCombinedAnalytics = async (req, res) => {
         'Cab': 0
       },
       rides: {
-        bike: { count: 0, totalFare: 0, totalDistance: 0 },
-        auto: { count: 0, totalFare: 0, totalDistance: 0 },
-        cabEconomy: { count: 0, totalFare: 0, totalDistance: 0 },
-        cabPremium: { count: 0, totalFare: 0, totalDistance: 0 }
+        "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 },
+        "Tricycle": { count: 0, totalFare: 0, totalDistance: 0 },
+        "Cab": { count: 0, totalFare: 0, totalDistance: 0 }
       }
     };
 

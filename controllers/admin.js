@@ -218,7 +218,9 @@ export const updateUser = async (req, res) => {
       sex, 
       schoolId, 
       licenseId, 
-      approved 
+      approved,
+      vehicleType,
+      userRole
     } = req.body;
     
     const user = await User.findById(id);
@@ -236,6 +238,13 @@ export const updateUser = async (req, res) => {
     if (licenseId !== undefined) user.licenseId = licenseId;
     if (sex !== undefined) user.sex = sex;
     if (approved !== undefined) user.approved = approved;
+    if (vehicleType !== undefined) user.vehicleType = vehicleType;
+    if (userRole !== undefined) user.userRole = userRole;
+    
+    // Add logging to debug vehicleType update
+    console.log('Update request body:', req.body);
+    console.log('VehicleType from request:', vehicleType);
+    console.log('User vehicleType before save:', user.vehicleType);
     
     // Email update requires special handling to check for duplicates
     if (email !== undefined && email !== user.email) {
@@ -257,6 +266,7 @@ export const updateUser = async (req, res) => {
     await user.save();
     
     const updatedUser = await User.findById(id).select('-password');
+    console.log('User vehicleType after save:', updatedUser.vehicleType);
     
     res.status(StatusCodes.OK).json({
       message: 'User updated successfully',
