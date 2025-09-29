@@ -2,7 +2,13 @@ import express from 'express';
 import { 
   getUserStats,
   getRideStats,
-  getCombinedAnalytics
+  getCombinedAnalytics,
+  getTopPerformingRiders,
+  getRevenueTrends,
+  getRideStatusMonitoring,
+  getPeakHoursAnalysis,
+  getPopularRoutes,
+  getCompletedRidesDebug
 } from '../controllers/analytics.js';
 import authenticateUser from '../middleware/authentication.js';
 
@@ -30,5 +36,11 @@ router.use(authenticateUser, isAdmin);
 router.get('/user-stats', getUserStats);
 router.get('/ride-stats', getRideStats);
 router.get('/combined', getCombinedAnalytics);
+router.get('/top-riders', getTopPerformingRiders);
+router.get('/revenue-trends', getRevenueTrends);
+router.get('/ride-monitoring', getRideStatusMonitoring);
+router.get('/peak-hours', getPeakHoursAnalysis);
+router.get('/popular-routes', getPopularRoutes);
+router.get('/debug/completed-rides', getCompletedRidesDebug);
 
 export default router;

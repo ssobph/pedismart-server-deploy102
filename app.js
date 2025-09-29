@@ -46,6 +46,90 @@ app.use((req, res, next) => {
   next();
 });
 
+// Debug endpoint to check server status
+app.get('/debug/status', async (req, res) => {
+  const onDutyRidersCount = req.io.sockets.adapter.rooms.get('onDuty')?.size || 0;
+  const connectedSockets = req.io.sockets.sockets.size;
+  
+  // Get all connected sockets
+  const sockets = await req.io.fetchSockets();
+  
+  // Get socket details
+  const socketDetails = sockets.map(socket => ({
+    id: socket.id,
+    userId: socket.user?.id,
+    role: socket.user?.role,
+    rooms: Array.from(socket.rooms),
+    isOnDuty: socket.rooms.has('onDuty')
+  }));
+  
+  res.json({
+    status: 'online',
+    timestamp: new Date().toISOString(),
+    socketStats: {
+      connectedSockets,
+      onDutyRiders: onDutyRidersCount,
+      sockets: socketDetails
+    },
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Debug endpoint to check socket rooms
+app.get('/debug/rooms', (req, res) => {
+  const rooms = req.io.sockets.adapter.rooms;
+  const roomData = {};
+  
+  // Convert Map to object for JSON response
+  for (const [roomName, roomSet] of rooms.entries()) {
+    // Skip socket IDs (they're also in rooms)
+    if (!roomName.includes('#')) {
+      roomData[roomName] = {
+        size: roomSet.size,
+        sockets: Array.from(roomSet)
+      };
+    }
+  }
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    rooms: roomData
+  });
+});
+
+// Debug endpoint to check searching rides
+app.get('/debug/rides', async (req, res) => {
+  try {
+    // Import Ride model
+    const Ride = (await import('./models/Ride.js')).default;
+    
+    // Get all searching rides
+    const searchingRides = await Ride.find({ status: 'SEARCHING_FOR_RIDER' })
+      .populate('customer', 'firstName lastName phone');
+    
+    // Get all rides
+    const allRides = await Ride.find({}).sort({ createdAt: -1 }).limit(10);
+    
+    res.json({
+      timestamp: new Date().toISOString(),
+      searchingRidesCount: searchingRides.length,
+      searchingRides,
+      recentRides: allRides.map(ride => ({
+        id: ride._id,
+        status: ride.status,
+        createdAt: ride.createdAt,
+        pickup: ride.pickup?.address,
+        drop: ride.drop?.address
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 const server = http.createServer(app);
 
 const io = new socketIo(server, { cors: { origin: "*" } });
@@ -61,7 +145,8 @@ handleSocketConnection(io);
 
 // Routes
 app.use("/api/auth", authRouter);
-app.use("/ride", authMiddleware, rideRouter);
+app.use("/api/v1/ride", authMiddleware, rideRouter); // Add /api/v1 prefix for consistency
+app.use("/ride", authMiddleware, rideRouter);        // Keep old route for backward compatibility
 app.use("/rating", authMiddleware, ratingRouter);
 app.use("/admin", adminRouter);
 app.use("/api/analytics", analyticsRouter);

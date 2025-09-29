@@ -112,10 +112,18 @@ export const register = async (req, res) => {
   }
 
   try {
-    // Check if user already exists
+    // Check if user already exists with same email
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       throw new BadRequestError("Email already in use");
+    }
+
+    // Check if phone number is provided and already exists with same role
+    if (phone) {
+      const existingPhoneUser = await User.findOne({ phone, role });
+      if (existingPhoneUser) {
+        throw new BadRequestError(`Phone number already registered as ${role}`);
+      }
     }
 
     // Format licenseId if provided and user is a rider
@@ -208,12 +216,11 @@ export const auth = async (req, res) => {
   }
 
   try {
-    let user = await User.findOne({ phone });
+    // Find user with specific phone and role combination
+    let user = await User.findOne({ phone, role });
 
     if (user) {
-      if (user.role !== role) {
-        throw new BadRequestError("Phone number and role do not match");
-      }
+      // User exists with this phone and role combination
 
       // Check if user is approved
       if (user.status === "disapproved") {
@@ -243,11 +250,23 @@ export const auth = async (req, res) => {
       });
     }
 
+    // Check if phone exists with different role to create unique email
+    const existingPhoneUser = await User.findOne({ phone });
+    let tempEmail;
+    
+    if (existingPhoneUser) {
+      // Phone exists with different role, create unique email
+      tempEmail = `${phone}-${role}@temp.ecoride.com`;
+    } else {
+      // Phone doesn't exist, use standard format
+      tempEmail = `${phone}@temp.ecoride.com`;
+    }
+
     user = new User({
       phone,
       role,
       // Set a temporary email and password for legacy users
-      email: `${phone}@temp.ecoride.com`,
+      email: tempEmail,
       password: Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-8),
       // Set approved to false by default
       approved: false,
@@ -333,7 +352,18 @@ export const updateUserProfile = async (req, res) => {
     if (firstName) user.firstName = firstName;
     if (middleName !== undefined) user.middleName = middleName;
     if (lastName) user.lastName = lastName;
-    if (phone) user.phone = phone;
+    if (phone) {
+      // Check if phone is already in use by another user with same role
+      const existingPhoneUser = await User.findOne({ 
+        phone, 
+        role: user.role, 
+        _id: { $ne: req.user.id } 
+      });
+      if (existingPhoneUser) {
+        throw new BadRequestError(`Phone number already in use by another ${user.role}`);
+      }
+      user.phone = phone;
+    }
     if (schoolId !== undefined) user.schoolId = schoolId;
     
     // Format and validate licenseId if provided and user is a rider

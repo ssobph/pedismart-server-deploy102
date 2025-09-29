@@ -6,64 +6,8 @@ import {
   calculateFare,
   generateOTP,
 } from "../utils/mapUtils.js";
+import { broadcastNewRideRequest, broadcastRideAccepted } from "./sockets.js";
 
-export const createRide = async (req, res) => {
-  const { vehicle, pickup, drop } = req.body;
-
-  if (!vehicle || !pickup || !drop) {
-    throw new BadRequestError("Vehicle, pickup, and drop details are required");
-  }
-
-  const {
-    address: pickupAddress,
-    latitude: pickupLat,
-    longitude: pickupLon,
-  } = pickup;
-
-  const { address: dropAddress, latitude: dropLat, longitude: dropLon } = drop;
-
-  if (
-    !pickupAddress ||
-    !pickupLat ||
-    !pickupLon ||
-    !dropAddress ||
-    !dropLat ||
-    !dropLon
-  ) {
-    throw new BadRequestError("Complete pickup and drop details are required");
-  }
-
-  const customer = req.user;
-
-  try {
-    const distance = calculateDistance(pickupLat, pickupLon, dropLat, dropLon);
-    const fare = calculateFare(distance, vehicle);
-
-    const ride = new Ride({
-      vehicle,
-      distance,
-      fare: fare[vehicle],
-      pickup: {
-        address: pickupAddress,
-        latitude: pickupLat,
-        longitude: pickupLon,
-      },
-      drop: { address: dropAddress, latitude: dropLat, longitude: dropLon },
-      customer: customer.id,
-      otp: generateOTP(),
-    });
-
-    await ride.save();
-
-    res.status(StatusCodes.CREATED).json({
-      message: "Ride created successfully",
-      ride,
-    });
-  } catch (error) {
-    console.error(error);
-    throw new BadRequestError("Failed to create ride");
-  }
-};
 
 export const acceptRide = async (req, res) => {
   const riderId = req.user.id;
@@ -74,7 +18,7 @@ export const acceptRide = async (req, res) => {
   }
 
   try {
-    let ride = await Ride.findById(rideId).populate("customer");
+    let ride = await Ride.findById(rideId).populate("customer", "firstName lastName phone");
 
     if (!ride) {
       throw new NotFoundError("Ride not found");
@@ -88,10 +32,47 @@ export const acceptRide = async (req, res) => {
     ride.status = "START";
     await ride.save();
 
-    ride = await ride.populate("rider");
+    ride = await ride.populate("rider", "firstName lastName phone vehicleType");
 
-    req.socket.to(`ride_${rideId}`).emit("rideUpdate", ride);
-    req.socket.to(`ride_${rideId}`).emit("rideAccepted");
+    // Broadcast to the specific ride room
+    if (req.io) {
+      console.log(`Broadcasting ride acceptance for ride ${rideId}`);
+      console.log(`Ride status: ${ride.status}, OTP: ${ride.otp}`);
+      console.log(`Customer ID: ${ride.customer}, Rider ID: ${riderId}`);
+      
+      // Send updated ride data to the ride room
+      req.io.to(`ride_${rideId}`).emit("rideUpdate", ride);
+      req.io.to(`ride_${rideId}`).emit("rideAccepted", ride);
+      
+      // Also try to find and directly notify the customer
+      const customerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === ride.customer.toString()
+      );
+      if (customerSocket) {
+        console.log(`Found customer socket, directly notifying customer ${ride.customer}`);
+        customerSocket.emit("rideUpdate", ride);
+        customerSocket.emit("rideAccepted", ride);
+        customerSocket.emit("rideData", ride); // Also send as rideData to force update
+      } else {
+        console.log(`Customer socket not found for customer ${ride.customer}`);
+      }
+      
+      // Send ride data with OTP to the rider who accepted
+      const riderSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === riderId
+      );
+      if (riderSocket) {
+        console.log(`Found rider socket, notifying rider ${riderId}`);
+        riderSocket.emit("rideAccepted", ride);
+      } else {
+        console.log(`Rider socket not found for rider ${riderId}`);
+      }
+      
+      // Broadcast to all on-duty riders that this ride is no longer available
+      broadcastRideAccepted(req.io, rideId);
+      
+      console.log(`Ride ${rideId} acceptance broadcast completed`);
+    }
 
     res.status(StatusCodes.OK).json({
       message: "Ride accepted successfully",
@@ -112,7 +93,7 @@ export const updateRideStatus = async (req, res) => {
   }
 
   try {
-    let ride = await Ride.findById(rideId).populate("customer rider");
+    let ride = await Ride.findById(rideId).populate("customer", "firstName lastName phone").populate("rider", "firstName lastName phone vehicleType");
 
     if (!ride) {
       throw new NotFoundError("Ride not found");
@@ -121,11 +102,52 @@ export const updateRideStatus = async (req, res) => {
     if (!["START", "ARRIVED", "COMPLETED"].includes(status)) {
       throw new BadRequestError("Invalid ride status");
     }
-
+    
+    // CRITICAL: Never allow changing status of a COMPLETED ride
+    if (ride.status === "COMPLETED") {
+      console.log(`🔒 Protected: Ride ${rideId} is already COMPLETED - status change to ${status} rejected`);
+      
+      // Return the ride without changing it
+      return res.status(StatusCodes.OK).json({
+        message: `Ride is already completed and cannot be changed`,
+        ride,
+      });
+    }
+    
+    // Log the status change with detailed information
+    console.log(`📝 Ride ${rideId} status change: ${ride.status} → ${status}`);
+    console.log(`📍 Ride details: Customer=${ride.customer._id}, Rider=${ride.rider?._id || 'None'}, OTP=${ride.otp}`);
+    
+    // Update the status
     ride.status = status;
     await ride.save();
+    
+    // Log confirmation of successful update
+    console.log(`✅ Ride ${rideId} status successfully updated to ${status}`);
 
-    req.socket.to(`ride_${rideId}`).emit("rideUpdate", ride);
+    // Broadcast to ride room
+    if (req.io) {
+      console.log(`Broadcasting ride status update: ${status} for ride ${rideId}`);
+      req.io.to(`ride_${rideId}`).emit("rideUpdate", ride);
+      
+      // Also directly notify the customer
+      const customerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === ride.customer._id.toString()
+      );
+      if (customerSocket) {
+        console.log(`Directly notifying customer ${ride.customer._id} about status update`);
+        customerSocket.emit("rideUpdate", ride);
+        customerSocket.emit("rideData", ride);
+      }
+      
+      // If completed, send completion event
+      if (status === "COMPLETED") {
+        req.io.to(`ride_${rideId}`).emit("rideCompleted", ride);
+        if (customerSocket) {
+          customerSocket.emit("rideCompleted", ride);
+        }
+      }
+    }
 
     res.status(StatusCodes.OK).json({
       message: `Ride status updated to ${status}`,
@@ -134,6 +156,64 @@ export const updateRideStatus = async (req, res) => {
   } catch (error) {
     console.error("Error updating ride status:", error);
     throw new BadRequestError("Failed to update ride status");
+  }
+};
+
+export const cancelRide = async (req, res) => {
+  const { rideId } = req.params;
+  const userId = req.user.id;
+
+  if (!rideId) {
+    throw new BadRequestError("Ride ID is required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId);
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Check if the user is authorized to cancel this ride
+    if (ride.customer.toString() !== userId && ride.rider?.toString() !== userId) {
+      throw new BadRequestError("You are not authorized to cancel this ride");
+    }
+
+    // CRITICAL: Never allow cancellation of a COMPLETED ride
+    if (ride.status === "COMPLETED") {
+      console.log(`🔒 Protected: Ride ${rideId} is already COMPLETED - cancellation rejected`);
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        message: "Ride is already completed and cannot be cancelled",
+      });
+    }
+    
+    // Only allow cancellation if ride is still searching or just started
+    if (!["SEARCHING_FOR_RIDER", "START"].includes(ride.status)) {
+      throw new BadRequestError("Ride cannot be cancelled at this stage");
+    }
+
+    // Update ride status to CANCELLED instead of deleting
+    ride.status = "CANCELLED";
+    await ride.save();
+
+    console.log(`🚫 Ride ${rideId} cancelled by user ${userId}, status updated to CANCELLED`);
+
+    // Broadcast cancellation to all relevant parties
+    if (req.io) {
+      req.io.to(`ride_${rideId}`).emit("rideCanceled", { 
+        message: "Ride has been cancelled",
+        ride: ride 
+      });
+      req.io.to("onDuty").emit("rideOfferCanceled", rideId);
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: "Ride cancelled successfully",
+      ride: ride
+    });
+  } catch (error) {
+    console.error("Error cancelling ride:", error);
+    throw new BadRequestError("Failed to cancel ride");
   }
 };
 
@@ -151,8 +231,8 @@ export const getMyRides = async (req, res) => {
     }
 
     const rides = await Ride.find(query)
-      .populate("customer", "name phone")
-      .populate("rider", "name phone")
+      .populate("customer", "firstName lastName phone email")
+      .populate("rider", "firstName lastName phone email vehicleType")
       .sort({ createdAt: -1 });
 
     res.status(StatusCodes.OK).json({
@@ -163,5 +243,121 @@ export const getMyRides = async (req, res) => {
   } catch (error) {
     console.error("Error retrieving rides:", error);
     throw new BadRequestError("Failed to retrieve rides");
+  }
+};
+
+export const getSearchingRides = async (req, res) => {
+  try {
+    const searchingRides = await Ride.find({ 
+      status: "SEARCHING_FOR_RIDER" 
+    }).populate("customer", "firstName lastName phone");
+    
+    console.log(`API: Found ${searchingRides.length} searching rides`);
+    
+    res.status(StatusCodes.OK).json({
+      message: "Searching rides retrieved successfully",
+      count: searchingRides.length,
+      rides: searchingRides,
+    });
+  } catch (error) {
+    console.error("Error retrieving searching rides:", error);
+    throw new BadRequestError("Failed to retrieve searching rides");
+  }
+};
+
+export const createRide = async (req, res) => {
+  const { vehicle, pickup, drop } = req.body;
+  const customerId = req.user.id; // Fixed: Use req.user.id instead of req.user
+
+  if (!vehicle || !pickup || !drop) {
+    throw new BadRequestError("Vehicle, pickup, and drop locations are required.");
+  }
+
+  try {
+    // Calculate distance between pickup and drop
+    const distance = calculateDistance(
+      pickup.latitude,
+      pickup.longitude,
+      drop.latitude,
+      drop.longitude
+    );
+    
+    console.log(`🛣️ Distance calculated: ${distance.toFixed(2)} km`);
+    
+    // Calculate fare based on vehicle type and distance
+    const fareOptions = calculateFare(distance);
+    const fare = fareOptions[vehicle];
+    console.log(`💰 Fare calculated: ${fare} for ${vehicle}`);
+
+    // Generate OTP
+    const otp = generateOTP(); // Fixed: Use correct function name
+    
+    console.log(`🔑 Creating ride with OTP: ${otp}`);
+
+    const ride = await Ride.create({
+      customer: customerId,
+      pickup,
+      drop,
+      vehicle,
+      distance,
+      fare,
+      otp,
+      status: "SEARCHING_FOR_RIDER",
+    });
+
+    console.log(`✅ Ride created with ID: ${ride._id}, OTP: ${otp}`);
+
+    // Populate the ride with customer info
+    const populatedRide = await Ride.findById(ride._id).populate("customer", "firstName lastName phone");
+
+    // Broadcast new ride to ALL on-duty riders
+    if (req.io) {
+      console.log(`🚨 Broadcasting new ride ${ride._id} to all on-duty riders`);
+      
+      // Get count of on-duty riders
+      const onDutyRoom = req.io.sockets.adapter.rooms.get('onDuty');
+      const onDutyCount = onDutyRoom ? onDutyRoom.size : 0;
+      console.log(`👥 Currently ${onDutyCount} riders on duty`);
+      
+      // Emit the new ride request to all on-duty riders
+      req.io.to("onDuty").emit("newRideRequest", populatedRide);
+      console.log(`📢 Emitted 'newRideRequest' event for ride ${ride._id}`);
+      
+      // Also emit updated list of all searching rides
+      const allSearchingRides = await Ride.find({ 
+        status: "SEARCHING_FOR_RIDER" 
+      }).populate("customer", "firstName lastName phone");
+      
+      console.log(`📋 Sending updated list of ${allSearchingRides.length} searching rides`);
+      req.io.to("onDuty").emit("allSearchingRides", allSearchingRides);
+      
+      // Log the IDs of all searching rides for debugging
+      if (allSearchingRides.length > 0) {
+        const rideIds = allSearchingRides.map(r => r._id.toString());
+        console.log(`📝 Current searching ride IDs: ${rideIds.join(', ')}`);
+      }
+      
+      // Direct broadcast to each on-duty rider individually as a fallback
+      const sockets = await req.io.fetchSockets();
+      const riderSockets = sockets.filter(socket => 
+        socket.user?.role === 'rider' && 
+        socket.rooms.has('onDuty')
+      );
+      
+      console.log(`🔄 Direct broadcasting to ${riderSockets.length} rider sockets`);
+      
+      riderSockets.forEach(socket => {
+        socket.emit("newRideRequest", populatedRide);
+        socket.emit("allSearchingRides", allSearchingRides);
+        console.log(`📲 Direct emit to rider: ${socket.user?.id}`);
+      });
+    }
+
+    res
+      .status(StatusCodes.CREATED)
+      .json({ message: "Ride created successfully", ride: populatedRide });
+  } catch (error) {
+    console.error("❌ Error creating ride:", error);
+    throw new BadRequestError("Failed to create ride");
   }
 };

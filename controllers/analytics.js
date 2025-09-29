@@ -1,5 +1,6 @@
 import User from '../models/User.js';
 import Ride from '../models/Ride.js';
+import Rating from '../models/Rating.js';
 import { StatusCodes } from 'http-status-codes';
 
 // Helper function to get date range based on filter
@@ -18,9 +19,19 @@ const getDateRange = (filter) => {
     case 'month':
       startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
       break;
+    case 'all':
+      // Show all data from the beginning of time
+      startDate = new Date('2020-01-01');
+      break;
     default:
-      startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // Default to 24h
+      // Default to showing all data instead of just 24h
+      startDate = new Date('2020-01-01');
   }
+
+  console.log(`📅 Date range for filter '${filter}':`, {
+    startDate: startDate.toISOString(),
+    endDate: endDate.toISOString()
+  });
 
   return { startDate, endDate };
 };
@@ -419,6 +430,509 @@ export const getCombinedAnalytics = async (req, res) => {
     console.error('Error fetching combined analytics:', error);
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       message: 'Failed to fetch combined analytics',
+      error: error.message
+    });
+  }
+};
+
+// Debug endpoint to check completed rides
+export const getCompletedRidesDebug = async (req, res) => {
+  try {
+    console.log('🔍 Debug: Checking completed rides in database...');
+    
+    // Get all completed rides without date filter
+    const allCompletedRides = await Ride.find({ 
+      status: 'COMPLETED' 
+    }).populate('customer', 'firstName lastName').populate('rider', 'firstName lastName vehicleType');
+    
+    console.log(`📊 Found ${allCompletedRides.length} completed rides total`);
+    
+    // Get completed rides with date breakdown
+    const ridesByDate = await Ride.aggregate([
+      { $match: { status: 'COMPLETED' } },
+      {
+        $group: {
+          _id: {
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }
+          },
+          count: { $sum: 1 },
+          totalRevenue: { $sum: '$fare' }
+        }
+      },
+      { $sort: { '_id.date': -1 } }
+    ]);
+    
+    res.status(StatusCodes.OK).json({
+      totalCompletedRides: allCompletedRides.length,
+      ridesByDate,
+      sampleRides: allCompletedRides.slice(0, 3).map(ride => ({
+        id: ride._id,
+        status: ride.status,
+        fare: ride.fare,
+        createdAt: ride.createdAt,
+        customer: ride.customer ? `${ride.customer.firstName} ${ride.customer.lastName}` : 'Unknown',
+        rider: ride.rider ? `${ride.rider.firstName} ${ride.rider.lastName}` : 'Unknown'
+      }))
+    });
+  } catch (error) {
+    console.error('❌ Error in debug endpoint:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch debug data',
+      error: error.message
+    });
+  }
+};
+
+// Get top performing riders
+export const getTopPerformingRiders = async (req, res) => {
+  try {
+    const { timeFilter = 'all', limit = 10 } = req.query;
+    const { startDate, endDate } = getDateRange(timeFilter);
+
+    console.log(`🏆 Fetching top riders with filter: ${timeFilter}`);
+
+    // Get top riders based on completed rides and ratings
+    const topRiders = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: startDate, $lte: endDate },
+          rider: { $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: '$rider',
+          totalRides: { $sum: 1 },
+          totalRevenue: { $sum: '$fare' },
+          totalDistance: { $sum: '$distance' }
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'riderInfo'
+        }
+      },
+      {
+        $lookup: {
+          from: 'ratings',
+          localField: '_id',
+          foreignField: 'rider',
+          as: 'ratings'
+        }
+      },
+      {
+        $addFields: {
+          averageRating: {
+            $cond: {
+              if: { $gt: [{ $size: '$ratings' }, 0] },
+              then: { $avg: '$ratings.rating' },
+              else: 0
+            }
+          },
+          totalRatings: { $size: '$ratings' }
+        }
+      },
+      {
+        $project: {
+          riderId: '$_id',
+          firstName: { $arrayElemAt: ['$riderInfo.firstName', 0] },
+          lastName: { $arrayElemAt: ['$riderInfo.lastName', 0] },
+          vehicleType: { $arrayElemAt: ['$riderInfo.vehicleType', 0] },
+          totalRides: 1,
+          totalRevenue: 1,
+          totalDistance: 1,
+          averageRating: { $round: ['$averageRating', 2] },
+          totalRatings: 1
+        }
+      },
+      {
+        $sort: { totalRides: -1, averageRating: -1 }
+      },
+      {
+        $limit: parseInt(limit)
+      }
+    ]);
+
+    res.status(StatusCodes.OK).json({
+      timeFilter,
+      period: { start: startDate, end: endDate },
+      topRiders
+    });
+  } catch (error) {
+    console.error('Error fetching top performing riders:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch top performing riders',
+      error: error.message
+    });
+  }
+};
+
+// Get revenue trends over time
+export const getRevenueTrends = async (req, res) => {
+  try {
+    const { timeFilter = 'all' } = req.query;
+    const { startDate, endDate } = getDateRange(timeFilter);
+
+    let groupBy;
+    let dateFormat;
+    
+    // Determine grouping based on time filter
+    switch (timeFilter) {
+      case '24h':
+        groupBy = {
+          year: { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+          day: { $dayOfMonth: '$createdAt' },
+          hour: { $hour: '$createdAt' }
+        };
+        dateFormat = '%Y-%m-%d %H:00';
+        break;
+      case 'week':
+        groupBy = {
+          year: { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+          day: { $dayOfMonth: '$createdAt' }
+        };
+        dateFormat = '%Y-%m-%d';
+        break;
+      case 'month':
+        groupBy = {
+          year: { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+          week: { $week: '$createdAt' }
+        };
+        dateFormat = '%Y-W%U';
+        break;
+      default:
+        groupBy = {
+          year: { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+          day: { $dayOfMonth: '$createdAt' },
+          hour: { $hour: '$createdAt' }
+        };
+        dateFormat = '%Y-%m-%d %H:00';
+    }
+
+    const revenueTrends = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: groupBy,
+          revenue: { $sum: '$fare' },
+          rides: { $sum: 1 },
+          distance: { $sum: '$distance' }
+        }
+      },
+      {
+        $addFields: {
+          period: {
+            $dateToString: {
+              format: dateFormat,
+              date: {
+                $dateFromParts: {
+                  year: '$_id.year',
+                  month: '$_id.month',
+                  day: '$_id.day',
+                  hour: { $ifNull: ['$_id.hour', 0] }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1, '_id.hour': 1 }
+      }
+    ]);
+
+    res.status(StatusCodes.OK).json({
+      timeFilter,
+      period: { start: startDate, end: endDate },
+      trends: revenueTrends
+    });
+  } catch (error) {
+    console.error('Error fetching revenue trends:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch revenue trends',
+      error: error.message
+    });
+  }
+};
+
+// Get real-time ride status monitoring
+export const getRideStatusMonitoring = async (req, res) => {
+  try {
+    // Get current ride status distribution
+    const currentRideStatus = await Ride.aggregate([
+      {
+        $match: {
+          status: { $ne: 'COMPLETED' }
+        }
+      },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Get active riders count
+    const activeRiders = await Ride.countDocuments({
+      status: { $in: ['START', 'ARRIVED'] },
+      rider: { $ne: null }
+    });
+
+    // Get waiting customers count
+    const waitingCustomers = await Ride.countDocuments({
+      status: 'SEARCHING_FOR_RIDER'
+    });
+
+    // Get average wait time for completed rides today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const avgWaitTime = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: today, $lt: tomorrow },
+          updatedAt: { $exists: true }
+        }
+      },
+      {
+        $addFields: {
+          waitTime: {
+            $subtract: ['$updatedAt', '$createdAt']
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          avgWaitTime: { $avg: '$waitTime' }
+        }
+      }
+    ]);
+
+    const formattedStatus = {
+      SEARCHING_FOR_RIDER: 0,
+      START: 0,
+      ARRIVED: 0
+    };
+
+    currentRideStatus.forEach(status => {
+      if (formattedStatus.hasOwnProperty(status._id)) {
+        formattedStatus[status._id] = status.count;
+      }
+    });
+
+    res.status(StatusCodes.OK).json({
+      currentStatus: formattedStatus,
+      activeRiders,
+      waitingCustomers,
+      averageWaitTime: avgWaitTime.length > 0 ? Math.round(avgWaitTime[0].avgWaitTime / 1000 / 60) : 0 // in minutes
+    });
+  } catch (error) {
+    console.error('Error fetching ride status monitoring:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch ride status monitoring',
+      error: error.message
+    });
+  }
+};
+
+// Get peak hours analysis
+export const getPeakHoursAnalysis = async (req, res) => {
+  try {
+    const { timeFilter = 'all' } = req.query;
+    const { startDate, endDate } = getDateRange(timeFilter);
+
+    const peakHours = await Ride.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            hour: { $hour: '$createdAt' },
+            dayOfWeek: { $dayOfWeek: '$createdAt' }
+          },
+          totalRides: { $sum: 1 },
+          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, '$fare', 0] } }
+        }
+      },
+      {
+        $group: {
+          _id: '$_id.hour',
+          avgRides: { $avg: '$totalRides' },
+          totalRides: { $sum: '$totalRides' },
+          totalRevenue: { $sum: '$totalRevenue' }
+        }
+      },
+      {
+        $sort: { '_id': 1 }
+      }
+    ]);
+
+    // Get day of week analysis
+    const dayOfWeekAnalysis = await Ride.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: { $dayOfWeek: '$createdAt' },
+          totalRides: { $sum: 1 },
+          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, '$fare', 0] } }
+        }
+      },
+      {
+        $sort: { '_id': 1 }
+      }
+    ]);
+
+    // Convert day numbers to names
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const formattedDayAnalysis = dayOfWeekAnalysis.map(day => ({
+      day: dayNames[day._id - 1],
+      totalRides: day.totalRides,
+      totalRevenue: day.totalRevenue
+    }));
+
+    res.status(StatusCodes.OK).json({
+      timeFilter,
+      period: { start: startDate, end: endDate },
+      hourlyData: peakHours,
+      dailyData: formattedDayAnalysis
+    });
+  } catch (error) {
+    console.error('Error fetching peak hours analysis:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch peak hours analysis',
+      error: error.message
+    });
+  }
+};
+
+// Get popular routes analysis
+export const getPopularRoutes = async (req, res) => {
+  try {
+    const { timeFilter = 'all', limit = 10 } = req.query;
+    const { startDate, endDate } = getDateRange(timeFilter);
+
+    const popularRoutes = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            pickupAddress: '$pickup.address',
+            dropAddress: '$drop.address'
+          },
+          count: { $sum: 1 },
+          totalRevenue: { $sum: '$fare' },
+          avgDistance: { $avg: '$distance' },
+          avgFare: { $avg: '$fare' }
+        }
+      },
+      {
+        $project: {
+          route: {
+            $concat: ['$_id.pickupAddress', ' → ', '$_id.dropAddress']
+          },
+          pickupAddress: '$_id.pickupAddress',
+          dropAddress: '$_id.dropAddress',
+          count: 1,
+          totalRevenue: 1,
+          avgDistance: { $round: ['$avgDistance', 2] },
+          avgFare: { $round: ['$avgFare', 2] }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      },
+      {
+        $limit: parseInt(limit)
+      }
+    ]);
+
+    // Get popular pickup locations
+    const popularPickups = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: '$pickup.address',
+          count: { $sum: 1 },
+          totalRevenue: { $sum: '$fare' }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      },
+      {
+        $limit: parseInt(limit)
+      }
+    ]);
+
+    // Get popular drop locations
+    const popularDrops = await Ride.aggregate([
+      {
+        $match: {
+          status: 'COMPLETED',
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: '$drop.address',
+          count: { $sum: 1 },
+          totalRevenue: { $sum: '$fare' }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      },
+      {
+        $limit: parseInt(limit)
+      }
+    ]);
+
+    res.status(StatusCodes.OK).json({
+      timeFilter,
+      period: { start: startDate, end: endDate },
+      popularRoutes,
+      popularPickups,
+      popularDrops
+    });
+  } catch (error) {
+    console.error('Error fetching popular routes:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Failed to fetch popular routes',
       error: error.message
     });
   }

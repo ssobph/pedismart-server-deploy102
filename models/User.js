@@ -14,7 +14,7 @@ const userSchema = new Schema(
     phone: {
       type: String,
       required: false,
-      unique: true,
+      // Removed unique constraint to allow same phone for different roles
       sparse: true,
     },
     email: {
@@ -121,6 +121,10 @@ const userSchema = new Schema(
     timestamps: true,
   }
 );
+
+// Create compound unique index for phone + role combination
+// This allows same phone for different roles but prevents duplicates within same role
+userSchema.index({ phone: 1, role: 1 }, { unique: true, sparse: true });
 
 // Hash password before saving
 userSchema.pre('save', async function() {
