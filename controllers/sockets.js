@@ -126,19 +126,21 @@ const handleSocketConnection = (io) => {
         try {
           console.log(`🔍 Rider ${user.id} requesting all searching rides`);
           
-          // Get rider's vehicle type from database or onDutyRiders map
-          const riderInfo = onDutyRiders.get(user.id) || {};
-          const vehicleType = riderInfo.vehicleType || "Single Motorcycle";
+          // Get rider's vehicle type from database
+          const User = (await import('../models/User.js')).default;
+          const riderUser = await User.findById(user.id).select('vehicleType');
+          const vehicleType = riderUser?.vehicleType || "Single Motorcycle";
           console.log(`🚗 Rider ${user.id} vehicle type: ${vehicleType}`);
           
-          // Find all rides with SEARCHING_FOR_RIDER status
+          // Find all rides with SEARCHING_FOR_RIDER status that match rider's vehicle type
           const searchingRides = await Ride.find({ 
-            status: "SEARCHING_FOR_RIDER" 
+            status: "SEARCHING_FOR_RIDER",
+            vehicle: vehicleType // PRE-FILTER by vehicle type on server
           }).populate("customer", "firstName lastName phone");
           
-          console.log(`📋 Found ${searchingRides.length} searching rides for rider ${user.id}`);
+          console.log(`📋 Found ${searchingRides.length} searching rides matching ${vehicleType} for rider ${user.id}`);
           
-          // Send all rides to the rider
+          // Send filtered rides to the rider
           console.log(`📤 Emitting ${searchingRides.length} rides to rider ${user.id}`);
           
           // Force a small delay to ensure socket is ready (helps with race conditions)
@@ -157,13 +159,8 @@ const handleSocketConnection = (io) => {
               searchingRides.forEach(ride => {
                 console.log(`📍 Ride ${ride._id}: ${ride.pickup?.address} to ${ride.drop?.address}, Vehicle: ${ride.vehicle}, Fare: ${ride.fare}`);
               });
-              
-              // Also send individual ride notifications to ensure they're received
-              searchingRides.forEach(ride => {
-                socket.emit("newRideRequest", ride);
-              });
             } else {
-              console.log(`🚧 No searching rides found to send to rider ${user.id}`);
+              console.log(`🚧 No searching rides matching ${vehicleType} found for rider ${user.id}`);
             }
           }, 100); // Small delay to ensure socket is ready
         } catch (error) {
@@ -262,11 +259,19 @@ const handleSocketConnection = (io) => {
                     timeoutRide.status = "TIMEOUT";
                     await timeoutRide.save();
                     console.log(`🕐 Ride ${rideId} timed out - status updated to TIMEOUT (NOT DELETED)`);
+                    
+                    // Broadcast ride timeout to all on-duty riders
+                    io.to("onDuty").emit("rideOfferTimeout", rideId);
+                    
+                    // Also emit rideCanceled to ensure removal from all lists
+                    io.to("onDuty").emit("rideCanceled", { 
+                      ride: timeoutRide,
+                      rideId: rideId,
+                      cancelledBy: "system",
+                      cancellerName: "System (Timeout)"
+                    });
                   }
                 }
-                
-                // Broadcast ride timeout to all on-duty riders
-                io.to("onDuty").emit("rideOfferTimeout", rideId);
                 
                 socket.emit("error", { message: "No riders found within 5 minutes." });
               }
@@ -292,27 +297,61 @@ const handleSocketConnection = (io) => {
             clearInterval(retryInterval);
             
             // ✅ FIXED: Update status to CANCELLED instead of deleting, but protect COMPLETED rides
-            const cancelRide = await Ride.findById(rideId);
+            const cancelRide = await Ride.findById(rideId)
+              .populate("customer", "firstName lastName phone")
+              .populate("rider", "firstName lastName phone");
+            
             if (cancelRide) {
               // CRITICAL: Never change a COMPLETED ride's status
               if (cancelRide.status === "COMPLETED") {
                 console.log(`🔒 Ride ${rideId} is COMPLETED - protected from status change to CANCELLED`);
               } else {
+                const cancellerName = `${cancelRide.customer.firstName} ${cancelRide.customer.lastName}`;
+                
                 cancelRide.status = "CANCELLED";
+                cancelRide.cancelledBy = "customer";
+                cancelRide.cancelledAt = new Date();
                 await cancelRide.save();
                 console.log(`🚫 Customer ${user.id} canceled ride ${rideId} - status updated to CANCELLED (NOT DELETED)`);
+                
+                // Broadcast to ride room with cancellation details
+                io.to(`ride_${rideId}`).emit("rideCanceled", { 
+                  message: "Ride has been cancelled",
+                  ride: cancelRide,
+                  cancelledBy: "customer",
+                  cancellerName: cancellerName
+                });
+                
+                // If rider was assigned, send alert
+                if (cancelRide.rider) {
+                  const riderSocket = getRiderSocket(cancelRide.rider._id);
+                  if (riderSocket) {
+                    console.log(`🚨 Sending cancellation alert to rider ${cancelRide.rider._id}`);
+                    riderSocket.emit("passengerCancelledRide", {
+                      rideId: rideId,
+                      message: `${cancellerName} has cancelled the ride`,
+                      passengerName: cancellerName,
+                      ride: cancelRide
+                    });
+                  }
+                }
+                
+                // IMMEDIATELY broadcast to all on-duty riders to remove from their lists
+                io.to("onDuty").emit("rideOfferCanceled", rideId);
+                
+                // Also emit rideCanceled to ensure all listeners receive it
+                io.to("onDuty").emit("rideCanceled", { 
+                  ride: cancelRide,
+                  rideId: rideId,
+                  cancelledBy: "customer",
+                  cancellerName: cancellerName
+                });
+                
+                console.log(`📢 IMMEDIATELY broadcasted cancellation of ride ${rideId} to all on-duty riders`);
               }
             }
             
-            socket.emit("rideCanceled", { message: "Ride canceled" });
-
-            // Broadcast ride cancellation to all on-duty riders
-            io.to("onDuty").emit("rideOfferCanceled", rideId);
-
-            if (ride.rider) {
-              const riderSocket = getRiderSocket(ride.rider._id);
-              riderSocket?.emit("rideCanceled", { message: `Customer ${user.id} canceled the ride.` });
-            }
+            socket.emit("rideCanceled", { message: "Ride canceled", ride: cancelRide });
           });
         } catch (error) {
           console.error("Error searching for rider:", error);
@@ -341,6 +380,12 @@ const handleSocketConnection = (io) => {
         console.error(`Error fetching ride ${rideId}:`, error);
         socket.emit("error", { message: "Failed to receive ride data" });
       }
+    });
+
+    socket.on("leaveRide", (rideId) => {
+      console.log(`🚪 User ${user.id} (${user.role}) leaving ride room ${rideId}`);
+      socket.leave(`ride_${rideId}`);
+      console.log(`✅ User ${user.id} successfully left ride room ${rideId}`);
     });
 
     socket.on("disconnect", () => {

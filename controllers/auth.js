@@ -339,7 +339,7 @@ export const getUserProfile = async (req, res) => {
 
 // Update user profile information
 export const updateUserProfile = async (req, res) => {
-  const { firstName, middleName, lastName, phone, schoolId, licenseId, email, sex } = req.body;
+  const { firstName, middleName, lastName, phone, schoolId, licenseId, email, sex, vehicleType } = req.body;
 
   try {
     const user = await User.findById(req.user.id);
@@ -383,6 +383,17 @@ export const updateUserProfile = async (req, res) => {
     }
     
     if (sex) user.sex = sex;
+    
+    // Update vehicle type if provided and user is a rider
+    if (vehicleType !== undefined && user.role === "rider") {
+      const validVehicleTypes = ["Single Motorcycle", "Tricycle", "Cab"];
+      if (vehicleType && !validVehicleTypes.includes(vehicleType)) {
+        throw new BadRequestError("Invalid vehicle type. Must be Single Motorcycle, Tricycle, or Cab");
+      }
+      user.vehicleType = vehicleType;
+      console.log(`✅ Updated vehicle type for rider ${user._id} to: ${vehicleType}`);
+    }
+    
     if (email) {
       // Check if email is already in use by another user
       const existingUser = await User.findOne({ email, _id: { $ne: req.user.id } });

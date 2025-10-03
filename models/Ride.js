@@ -46,6 +46,15 @@ const rideSchema = new Schema(
       type: String,
       default: null,
     },
+    cancelledBy: {
+      type: String,
+      enum: ["customer", "rider"],
+      default: null,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

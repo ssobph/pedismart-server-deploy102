@@ -28,6 +28,22 @@ export const acceptRide = async (req, res) => {
       throw new BadRequestError("Ride is no longer available for assignment");
     }
 
+    // Get rider details to check vehicle type
+    const User = (await import('../models/User.js')).default;
+    const rider = await User.findById(riderId);
+    
+    if (!rider) {
+      throw new NotFoundError("Rider not found");
+    }
+
+    // Check if rider's vehicle type matches the ride's requested vehicle type
+    if (rider.vehicleType !== ride.vehicle) {
+      console.log(`❌ Vehicle type mismatch: Rider has ${rider.vehicleType}, but ride requires ${ride.vehicle}`);
+      throw new BadRequestError(`This ride requires a ${ride.vehicle}. Your vehicle type is ${rider.vehicleType}. Please update your profile to match the ride requirements.`);
+    }
+
+    console.log(`✅ Vehicle type match: Rider ${riderId} with ${rider.vehicleType} accepting ${ride.vehicle} ride`);
+
     ride.rider = riderId;
     ride.status = "START";
     await ride.save();
@@ -140,12 +156,21 @@ export const updateRideStatus = async (req, res) => {
         customerSocket.emit("rideData", ride);
       }
       
-      // If completed, send completion event
+      // If completed, send completion event and remove from riders' lists
       if (status === "COMPLETED") {
         req.io.to(`ride_${rideId}`).emit("rideCompleted", ride);
         if (customerSocket) {
           customerSocket.emit("rideCompleted", ride);
         }
+        
+        // Remove from all on-duty riders' lists (in case it's still showing)
+        req.io.to("onDuty").emit("rideCompleted", { 
+          _id: rideId,
+          rideId: rideId,
+          ride: ride
+        });
+        
+        console.log(`🎉 Ride ${rideId} completed - removed from all riders' lists`);
       }
     }
 
@@ -168,14 +193,16 @@ export const cancelRide = async (req, res) => {
   }
 
   try {
-    const ride = await Ride.findById(rideId);
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone");
 
     if (!ride) {
       throw new NotFoundError("Ride not found");
     }
 
     // Check if the user is authorized to cancel this ride
-    if (ride.customer.toString() !== userId && ride.rider?.toString() !== userId) {
+    if (ride.customer._id.toString() !== userId && ride.rider?._id.toString() !== userId) {
       throw new BadRequestError("You are not authorized to cancel this ride");
     }
 
@@ -188,28 +215,86 @@ export const cancelRide = async (req, res) => {
     }
     
     // Only allow cancellation if ride is still searching or just started
-    if (!["SEARCHING_FOR_RIDER", "START"].includes(ride.status)) {
+    if (!["SEARCHING_FOR_RIDER", "START", "ARRIVED"].includes(ride.status)) {
       throw new BadRequestError("Ride cannot be cancelled at this stage");
     }
 
+    // Determine who cancelled the ride
+    const cancelledBy = ride.customer._id.toString() === userId ? "customer" : "rider";
+    const cancellerName = cancelledBy === "customer" 
+      ? `${ride.customer.firstName} ${ride.customer.lastName}` 
+      : `${ride.rider?.firstName} ${ride.rider?.lastName}`;
+
     // Update ride status to CANCELLED instead of deleting
     ride.status = "CANCELLED";
+    ride.cancelledBy = cancelledBy;
+    ride.cancelledAt = new Date();
     await ride.save();
 
-    console.log(`🚫 Ride ${rideId} cancelled by user ${userId}, status updated to CANCELLED`);
+    console.log(`🚫 Ride ${rideId} cancelled by ${cancelledBy} (${userId}), status updated to CANCELLED`);
 
     // Broadcast cancellation to all relevant parties
     if (req.io) {
+      // Emit to ride room
       req.io.to(`ride_${rideId}`).emit("rideCanceled", { 
         message: "Ride has been cancelled",
-        ride: ride 
+        ride: ride,
+        cancelledBy: cancelledBy,
+        cancellerName: cancellerName
       });
+      
+      // If passenger cancelled after driver accepted, send alert to driver
+      if (cancelledBy === "customer" && ride.rider && ride.status !== "SEARCHING_FOR_RIDER") {
+        const riderSocket = [...req.io.sockets.sockets.values()].find(
+          socket => socket.user?.id === ride.rider._id.toString()
+        );
+        
+        if (riderSocket) {
+          console.log(`🚨 Sending cancellation alert to rider ${ride.rider._id}`);
+          riderSocket.emit("passengerCancelledRide", {
+            rideId: rideId,
+            message: `${cancellerName} has cancelled the ride`,
+            passengerName: cancellerName,
+            ride: ride
+          });
+        }
+      }
+      
+      // If driver cancelled, send alert to passenger
+      if (cancelledBy === "rider" && ride.customer) {
+        const customerSocket = [...req.io.sockets.sockets.values()].find(
+          socket => socket.user?.id === ride.customer._id.toString()
+        );
+        
+        if (customerSocket) {
+          console.log(`🚨 Sending cancellation alert to customer ${ride.customer._id}`);
+          customerSocket.emit("riderCancelledRide", {
+            rideId: rideId,
+            message: `${cancellerName} has cancelled the ride`,
+            riderName: cancellerName,
+            ride: ride
+          });
+        }
+      }
+      
+      // IMMEDIATELY remove from all on-duty riders' lists
       req.io.to("onDuty").emit("rideOfferCanceled", rideId);
+      
+      // Also broadcast rideCanceled to ensure all listeners receive it
+      req.io.to("onDuty").emit("rideCanceled", { 
+        ride: ride,
+        rideId: rideId,
+        cancelledBy: cancelledBy,
+        cancellerName: cancellerName
+      });
+      
+      console.log(`📢 Broadcasted ride ${rideId} cancellation to all relevant parties`);
     }
 
     res.status(StatusCodes.OK).json({
       message: "Ride cancelled successfully",
-      ride: ride
+      ride: ride,
+      cancelledBy: cancelledBy
     });
   } catch (error) {
     console.error("Error cancelling ride:", error);
