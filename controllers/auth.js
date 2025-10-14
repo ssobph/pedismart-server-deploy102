@@ -50,11 +50,32 @@ export const login = async (req, res) => {
     if (role !== 'admin') {
       if (user.status === "disapproved") {
         console.log("User is disapproved");
-        return res.status(StatusCodes.FORBIDDEN).json({
-          message: "Your account has been disapproved. Please contact support for assistance.",
-          status: "disapproved",
-          isApproved: false
-        });
+        
+        // Check if user has a penalty
+        if (user.penaltyLiftDate) {
+          const currentDate = new Date();
+          const penaltyLiftDate = new Date(user.penaltyLiftDate);
+          const isPenaltyActive = currentDate < penaltyLiftDate;
+          
+          return res.status(StatusCodes.FORBIDDEN).json({
+            message: "Your account has been disapproved.",
+            status: "disapproved",
+            isApproved: false,
+            hasPenalty: true,
+            disapprovalReason: user.disapprovalReason || "No reason provided",
+            penaltyComment: user.penaltyComment || "No reason provided",
+            penaltyLiftDate: user.penaltyLiftDate,
+            isPenaltyActive
+          });
+        } else {
+          return res.status(StatusCodes.FORBIDDEN).json({
+            message: "Your account has been disapproved.",
+            status: "disapproved",
+            isApproved: false,
+            hasPenalty: false,
+            disapprovalReason: user.disapprovalReason || "No reason provided"
+          });
+        }
       } else if (user.status === "pending") {
         console.log("User is pending approval");
         return res.status(StatusCodes.FORBIDDEN).json({
@@ -225,11 +246,30 @@ export const auth = async (req, res) => {
       // Check if user is approved
       if (user.status === "disapproved") {
         console.log("User is disapproved");
-        return res.status(StatusCodes.FORBIDDEN).json({
-          message: "Your account has been disapproved. Please contact support for assistance.",
-          status: "disapproved",
-          isApproved: false
-        });
+        
+        // Check if user has a penalty
+        if (user.penaltyLiftDate) {
+          const currentDate = new Date();
+          const penaltyLiftDate = new Date(user.penaltyLiftDate);
+          const isPenaltyActive = currentDate < penaltyLiftDate;
+          
+          return res.status(StatusCodes.FORBIDDEN).json({
+            message: "Your account has been disapproved.",
+            status: "disapproved",
+            isApproved: false,
+            hasPenalty: true,
+            penaltyComment: user.penaltyComment || "No reason provided",
+            penaltyLiftDate: user.penaltyLiftDate,
+            isPenaltyActive
+          });
+        } else {
+          return res.status(StatusCodes.FORBIDDEN).json({
+            message: "Your account has been disapproved. Please contact support for assistance.",
+            status: "disapproved",
+            isApproved: false,
+            hasPenalty: false
+          });
+        }
       } else if (user.status === "pending") {
         console.log("User is pending approval");
         return res.status(StatusCodes.FORBIDDEN).json({

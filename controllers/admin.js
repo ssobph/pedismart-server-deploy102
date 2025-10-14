@@ -172,7 +172,7 @@ export const approveUser = async (req, res) => {
 export const disapproveUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason, rejectionDeadline } = req.body;
     const user = await User.findById(id);
     
     if (!user) {
@@ -181,6 +181,13 @@ export const disapproveUser = async (req, res) => {
     
     user.status = "disapproved";
     user.disapprovalReason = reason || 'No reason provided';
+    
+    // Set rejection deadline if provided
+    if (rejectionDeadline) {
+      user.rejectionDeadline = new Date(rejectionDeadline);
+      console.log(`📅 Rejection deadline set for user ${id}: ${user.rejectionDeadline}`);
+    }
+    
     await user.save();
     
     const updatedUser = await User.findById(id).select('-password');
@@ -223,28 +230,46 @@ export const updateUser = async (req, res) => {
       userRole
     } = req.body;
     
+    console.log('📥 Update user request received for ID:', id);
+    console.log('📦 Request body:', req.body);
+    
     const user = await User.findById(id);
     
     if (!user) {
       throw new NotFoundError(`No user found with id ${id}`);
     }
     
-    // Update fields if provided
+    console.log('👤 Current user role:', user.role);
+    console.log('📝 Current user data:', {
+      firstName: user.firstName,
+      lastName: user.lastName,
+      userRole: user.userRole,
+      schoolId: user.schoolId,
+      vehicleType: user.vehicleType,
+      licenseId: user.licenseId
+    });
+    
+    // Update fields if provided (skip empty strings for enum fields)
     if (firstName !== undefined) user.firstName = firstName;
     if (middleName !== undefined) user.middleName = middleName;
     if (lastName !== undefined) user.lastName = lastName;
     if (phone !== undefined) user.phone = phone;
     if (schoolId !== undefined) user.schoolId = schoolId;
     if (licenseId !== undefined) user.licenseId = licenseId;
-    if (sex !== undefined) user.sex = sex;
+    if (sex !== undefined && sex !== '') user.sex = sex;
     if (approved !== undefined) user.approved = approved;
-    if (vehicleType !== undefined) user.vehicleType = vehicleType;
-    if (userRole !== undefined) user.userRole = userRole;
+    // Only update vehicleType if it's a valid value (not empty string)
+    if (vehicleType !== undefined && vehicleType !== '') user.vehicleType = vehicleType;
+    if (userRole !== undefined && userRole !== '') user.userRole = userRole;
     
-    // Add logging to debug vehicleType update
-    console.log('Update request body:', req.body);
-    console.log('VehicleType from request:', vehicleType);
-    console.log('User vehicleType before save:', user.vehicleType);
+    console.log('📝 Updated user data before save:', {
+      firstName: user.firstName,
+      lastName: user.lastName,
+      userRole: user.userRole,
+      schoolId: user.schoolId,
+      vehicleType: user.vehicleType,
+      licenseId: user.licenseId
+    });
     
     // Email update requires special handling to check for duplicates
     if (email !== undefined && email !== user.email) {
@@ -264,9 +289,17 @@ export const updateUser = async (req, res) => {
     }
     
     await user.save();
+    console.log('💾 User saved successfully');
     
     const updatedUser = await User.findById(id).select('-password');
-    console.log('User vehicleType after save:', updatedUser.vehicleType);
+    console.log('✅ Updated user data after save:', {
+      firstName: updatedUser.firstName,
+      lastName: updatedUser.lastName,
+      userRole: updatedUser.userRole,
+      schoolId: updatedUser.schoolId,
+      vehicleType: updatedUser.vehicleType,
+      licenseId: updatedUser.licenseId
+    });
     
     res.status(StatusCodes.OK).json({
       message: 'User updated successfully',
@@ -298,18 +331,37 @@ export const addPenaltyComment = async (req, res) => {
     const { id } = req.params;
     const { penaltyComment, penaltyLiftDate } = req.body;
     
+    const user = await User.findById(id);
+    
+    if (!user) {
+      throw new NotFoundError(`No user found with id ${id}`);
+    }
+    
+    // Check if this is a penalty removal (empty comment or past date)
+    const isRemoval = !penaltyComment || penaltyComment.trim() === '' || 
+                      (penaltyLiftDate && new Date(penaltyLiftDate) < new Date());
+    
+    if (isRemoval) {
+      // Remove penalty
+      user.penaltyComment = '';
+      user.penaltyLiftDate = null;
+      await user.save();
+      
+      const updatedUser = await User.findById(id).select('-password');
+      
+      return res.status(StatusCodes.OK).json({
+        message: 'Penalty removed successfully',
+        user: updatedUser
+      });
+    }
+    
+    // Adding/updating penalty - validate required fields
     if (!penaltyComment || penaltyComment.trim() === '') {
       throw new BadRequestError('Penalty comment is required');
     }
     
     if (!penaltyLiftDate) {
       throw new BadRequestError('Penalty lift date is required');
-    }
-    
-    const user = await User.findById(id);
-    
-    if (!user) {
-      throw new NotFoundError(`No user found with id ${id}`);
     }
     
     // Check if user is disapproved
@@ -340,7 +392,7 @@ export const addPenaltyComment = async (req, res) => {
       return;
     }
     
-    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ 
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       message: 'Error adding penalty comment',
       error: error.message
     });

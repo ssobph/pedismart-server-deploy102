@@ -30,6 +30,9 @@ import analyticsRouter from './routes/analytics.js';
 // Import socket handler
 import handleSocketConnection from './controllers/sockets.js';
 
+// Import scheduled jobs
+import { initAutoApprovalJob } from './jobs/autoApprovalJob.js';
+
 EventEmitter.defaultMaxListeners = 20;
 
 const app = express();
@@ -158,6 +161,11 @@ app.use(errorHandlerMiddleware);
 const start = async () => {
   try {
     await connectDB(process.env.MONGO_URI);
+    
+    // Initialize scheduled jobs after database connection
+    console.log('🔧 Initializing scheduled jobs...');
+    initAutoApprovalJob(60); // Run every 60 minutes
+    
     const PORT = process.env.PORT || 3000;
     server.listen(PORT, "0.0.0.0", () =>
       console.log(`HTTP server is running on port http://localhost:${PORT}`)

@@ -108,6 +108,10 @@ const userSchema = new Schema(
       type: Date,
       required: false,
     },
+    rejectionDeadline: {
+      type: Date,
+      required: false,
+    },
     resetPasswordCode: {
       type: String,
       required: false,
