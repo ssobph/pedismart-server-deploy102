@@ -285,7 +285,7 @@ export const auth = async (req, res) => {
       phone,
       role,
       // Set a temporary email and password for legacy users
-      email: `${phone}@temp.ecoride.com`,
+      email: `${phone}@temp.pedismart.com`,
       password: Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-8),
       // Set approved to false by default
       approved: false,

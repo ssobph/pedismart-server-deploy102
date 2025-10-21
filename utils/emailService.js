@@ -24,12 +24,12 @@ export const sendVerificationEmail = async (email, verificationCode) => {
     const transporter = createTransporter();
     
     const mailOptions = {
-      from: process.env.EMAIL_USER || 'noreply@ecoride.com',
+      from: process.env.EMAIL_USER || 'noreply@pedismart.com',
       to: email,
-      subject: 'EcoRide - Password Reset Verification Code',
+      subject: 'Pedismart - Password Reset Verification Code',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #4CAF50;">EcoRide Password Reset</h2>
+          <h2 style="color: #4CAF50;">Pedismart Password Reset</h2>
           <p>You have requested to reset your password. Please use the verification code below:</p>
           <div style="background-color: #f5f5f5; padding: 20px; text-align: center; margin: 20px 0;">
             <h1 style="color: #333; font-size: 32px; margin: 0; letter-spacing: 5px;">${verificationCode}</h1>
@@ -37,7 +37,7 @@ export const sendVerificationEmail = async (email, verificationCode) => {
           <p>This code will expire in 10 minutes.</p>
           <p>If you didn't request this password reset, please ignore this email.</p>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="color: #666; font-size: 12px;">This is an automated message from EcoRide. Please do not reply to this email.</p>
+          <p style="color: #666; font-size: 12px;">This is an automated message from Pedismart. Please do not reply to this email.</p>
         </div>
       `
     };
@@ -57,9 +57,9 @@ export const sendApprovalEmail = async (email, userName, userRole) => {
     const transporter = createTransporter();
     
     const mailOptions = {
-      from: process.env.EMAIL_USER || 'noreply@ecoride.com',
+      from: process.env.EMAIL_USER || 'noreply@Pedismart.com',
       to: email,
-      subject: '✅ EcoRide - Your Account Has Been Approved!',
+      subject: '✅ Pedismart - Your Account Has Been Approved!',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background-color: #4CAF50; padding: 20px; text-align: center;">
@@ -67,20 +67,20 @@ export const sendApprovalEmail = async (email, userName, userRole) => {
           </div>
           <div style="padding: 30px; background-color: #f9f9f9;">
             <p style="font-size: 16px;">Dear ${userName},</p>
-            <p style="font-size: 16px;">Great news! Your EcoRide ${userRole} account has been <strong>approved</strong> by our admin team.</p>
+            <p style="font-size: 16px;">Great news! Your Pedismart ${userRole} account has been <strong>approved</strong> by our admin team.</p>
             <div style="background-color: white; padding: 20px; border-left: 4px solid #4CAF50; margin: 20px 0;">
-              <p style="margin: 0; font-size: 16px;"><strong>✓ You can now log in and start using EcoRide!</strong></p>
+              <p style="margin: 0; font-size: 16px;"><strong>✓ You can now log in and start using Pedismart!</strong></p>
             </div>
             <p style="font-size: 16px;">What's next?</p>
             <ul style="font-size: 16px; line-height: 1.8;">
-              <li>Open the EcoRide app</li>
+              <li>Open the Pedismart app</li>
               <li>Log in with your registered email</li>
               <li>${userRole === 'rider' ? 'Start accepting ride requests and earning!' : 'Start booking rides with verified drivers!'}</li>
             </ul>
-            <p style="font-size: 16px;">Thank you for choosing EcoRide. We're excited to have you on board!</p>
+            <p style="font-size: 16px;">Thank you for choosing Pedismart. We're excited to have you on board!</p>
           </div>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="color: #666; font-size: 12px; text-align: center;">This is an automated message from EcoRide. Please do not reply to this email.</p>
+          <p style="color: #666; font-size: 12px; text-align: center;">This is an automated message from Pedismart. Please do not reply to this email.</p>
         </div>
       `
     };
@@ -100,9 +100,9 @@ export const sendDisapprovalEmail = async (email, userName, userRole, reason) =>
     const transporter = createTransporter();
     
     const mailOptions = {
-      from: process.env.EMAIL_USER || 'noreply@ecoride.com',
+      from: process.env.EMAIL_USER || 'noreply@Pedismart.com',
       to: email,
-      subject: '❌ EcoRide - Account Application Update',
+      subject: '❌ Pedismart - Account Application Update',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background-color: #f44336; padding: 20px; text-align: center;">
@@ -110,7 +110,7 @@ export const sendDisapprovalEmail = async (email, userName, userRole, reason) =>
           </div>
           <div style="padding: 30px; background-color: #f9f9f9;">
             <p style="font-size: 16px;">Dear ${userName},</p>
-            <p style="font-size: 16px;">Thank you for your interest in joining EcoRide as a ${userRole}.</p>
+            <p style="font-size: 16px;">Thank you for your interest in joining Pedismart as a ${userRole}.</p>
             <p style="font-size: 16px;">Unfortunately, we are unable to approve your account at this time.</p>
             <div style="background-color: white; padding: 20px; border-left: 4px solid #f44336; margin: 20px 0;">
               <p style="margin: 0 0 10px 0; font-weight: bold; color: #f44336;">Reason for Disapproval:</p>
@@ -126,7 +126,7 @@ export const sendDisapprovalEmail = async (email, userName, userRole, reason) =>
             <p style="font-size: 16px;">We appreciate your understanding and hope to have you join our community in the future.</p>
           </div>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="color: #666; font-size: 12px; text-align: center;">This is an automated message from EcoRide. Please do not reply to this email.</p>
+          <p style="color: #666; font-size: 12px; text-align: center;">This is an automated message from Pedismart. Please do not reply to this email.</p>
         </div>
       `
     };

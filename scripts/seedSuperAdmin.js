@@ -14,8 +14,8 @@ const seedSuperAdmin = async () => {
     const superAdminData = {
       username: 'superadmin',
       name: 'Super Admin',
-      email: 'superadmin@ecoride.com',
-      password: 'Ecoride@2025',
+      email: 'superadmin@pedismart.com',
+      password: 'Pedismart@2025',
       role: 'super-admin',
       isActive: true
     };

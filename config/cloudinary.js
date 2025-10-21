@@ -21,7 +21,7 @@ const chatImageStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: async (req, file) => {
     return {
-      folder: 'ecoride/chat_images',
+      folder: 'pedismart/chat_images',
       allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
       public_id: `chat_${Date.now()}_${Math.random().toString(36).substring(7)}`,
       transformation: [

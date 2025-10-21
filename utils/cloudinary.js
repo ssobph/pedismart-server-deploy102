@@ -37,7 +37,7 @@ try {
     cloudinary: cloudinary.v2,
     params: async (req, file) => {
       // Determine folder based on the route
-      const folder = req.path.includes('/chat/') ? 'ecoride/chat_images' : 'ecoride-documents';
+      const folder = req.path.includes('/chat/') ? 'pedismart/chat_images' : 'pedismart-documents';
       
       return {
         folder: folder,

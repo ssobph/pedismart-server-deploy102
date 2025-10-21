@@ -11,16 +11,16 @@ const removeOldAdmin = async () => {
     console.log('✅ Connected to MongoDB');
 
     // Find and delete the old hardcoded admin account
-    const oldAdmin = await User.findOne({ email: 'admin@ecoride.com' });
+    const oldAdmin = await User.findOne({ email: 'admin@pedismart.com' });
     
     if (oldAdmin) {
-      await User.deleteOne({ email: 'admin@ecoride.com' });
+      await User.deleteOne({ email: 'admin@pedismart.com' });
       console.log('✅ Removed old hardcoded admin account:');
-      console.log(`   Email: admin@ecoride.com`);
+      console.log(`   Email: admin@pedismart.com`);
       console.log(`   Role: ${oldAdmin.role}`);
       console.log(`   Name: ${oldAdmin.firstName} ${oldAdmin.lastName}`);
     } else {
-      console.log('ℹ️  No old admin account found with email: admin@ecoride.com');
+      console.log('ℹ️  No old admin account found with email: admin@pedismart.com');
     }
 
     console.log('\n✅ Cleanup complete!\n');

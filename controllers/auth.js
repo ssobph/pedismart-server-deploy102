@@ -296,10 +296,10 @@ export const auth = async (req, res) => {
     
     if (existingPhoneUser) {
       // Phone exists with different role, create unique email
-      tempEmail = `${phone}-${role}@temp.ecoride.com`;
+      tempEmail = `${phone}-${role}@temp.pedismart.com`;
     } else {
       // Phone doesn't exist, use standard format
-      tempEmail = `${phone}@temp.ecoride.com`;
+      tempEmail = `${phone}@temp.pedismart.com`;
     }
 
     user = new User({
