@@ -35,14 +35,19 @@ try {
   console.log('Setting up CloudinaryStorage...');
   storage = new CloudinaryStorage({
     cloudinary: cloudinary.v2,
-    params: {
-      folder: 'ecoride-documents',
-      allowed_formats: ['jpg', 'jpeg', 'png', 'pdf'],
-      transformation: [
-        { width: 1000, height: 1000, crop: 'limit', quality: 'auto' }
-      ],
-      // Add timeout and ensure proper error handling
-      timeout: 60000, // 60 seconds timeout
+    params: async (req, file) => {
+      // Determine folder based on the route
+      const folder = req.path.includes('/chat/') ? 'ecoride/chat_images' : 'ecoride-documents';
+      
+      return {
+        folder: folder,
+        allowed_formats: ['jpg', 'jpeg', 'png', 'pdf', 'gif', 'webp'],
+        transformation: [
+          { width: 1200, height: 1200, crop: 'limit', quality: 'auto' }
+        ],
+        public_id: `${folder.split('/')[1]}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+        timeout: 60000, // 60 seconds timeout
+      };
     },
   });
   console.log('CloudinaryStorage setup successful');
@@ -60,11 +65,11 @@ export const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },
   fileFilter: (req, file, cb) => {
-    // Check file type
+    // Check file type - allow images and PDFs
     if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
       cb(null, true);
     } else {
-      cb(new Error('Only image files (JPG, JPEG, PNG) and PDF files are allowed'), false);
+      cb(new Error('Only image files (JPG, JPEG, PNG, GIF, WEBP) and PDF files are allowed'), false);
     }
   }
 });

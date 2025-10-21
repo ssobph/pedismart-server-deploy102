@@ -1,6 +1,9 @@
 import User from '../models/User.js';
+import Ride from '../models/Ride.js';
 import { StatusCodes } from 'http-status-codes';
 import { BadRequestError, NotFoundError } from '../errors/index.js';
+import { logActivity } from './adminManagement.js';
+import { sendApprovalEmail, sendDisapprovalEmail } from '../utils/emailService.js';
 
 // Get all users
 export const getAllUsers = async (req, res) => {
@@ -149,6 +152,31 @@ export const approveUser = async (req, res) => {
     
     const updatedUser = await User.findById(id).select('-password');
     
+    // Log activity
+    await logActivity(
+      req.user?.id,
+      req.user?.name || req.user?.username || 'Admin',
+      'APPROVED_USER',
+      'USER',
+      user._id,
+      `${user.firstName} ${user.lastName}`,
+      `Approved ${user.role} account: ${user.firstName} ${user.lastName} (${user.email})`,
+      { userId: user._id, email: user.email, role: user.role },
+      req.ip
+    );
+    
+    // Send approval email notification
+    if (user.email) {
+      const userName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
+      const emailSent = await sendApprovalEmail(user.email, userName, user.role);
+      
+      if (emailSent) {
+        console.log(`✅ Approval notification email sent to ${user.email}`);
+      } else {
+        console.log(`⚠️ Failed to send approval email to ${user.email}, but user was approved`);
+      }
+    }
+    
     res.status(StatusCodes.OK).json({
       message: 'User approved successfully',
       user: updatedUser
@@ -191,6 +219,32 @@ export const disapproveUser = async (req, res) => {
     await user.save();
     
     const updatedUser = await User.findById(id).select('-password');
+    
+    // Log activity
+    await logActivity(
+      req.user?.id,
+      req.user?.name || req.user?.username || 'Admin',
+      'DISAPPROVED_USER',
+      'USER',
+      user._id,
+      `${user.firstName} ${user.lastName}`,
+      `Disapproved ${user.role} account: ${user.firstName} ${user.lastName}. Reason: ${reason || 'No reason provided'}`,
+      { userId: user._id, email: user.email, role: user.role, reason, rejectionDeadline },
+      req.ip
+    );
+    
+    // Send disapproval email notification
+    if (user.email) {
+      const userName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
+      const disapprovalReason = reason || 'No specific reason provided';
+      const emailSent = await sendDisapprovalEmail(user.email, userName, user.role, disapprovalReason);
+      
+      if (emailSent) {
+        console.log(`📧 Disapproval notification email sent to ${user.email}`);
+      } else {
+        console.log(`⚠️ Failed to send disapproval email to ${user.email}, but user was disapproved`);
+      }
+    }
     
     res.status(StatusCodes.OK).json({
       message: 'User disapproved successfully',
@@ -301,6 +355,32 @@ export const updateUser = async (req, res) => {
       licenseId: updatedUser.licenseId
     });
     
+    // Log activity
+    const changedFields = [];
+    if (firstName !== undefined) changedFields.push('firstName');
+    if (middleName !== undefined) changedFields.push('middleName');
+    if (lastName !== undefined) changedFields.push('lastName');
+    if (email !== undefined) changedFields.push('email');
+    if (phone !== undefined) changedFields.push('phone');
+    if (role !== undefined) changedFields.push('role');
+    if (sex !== undefined) changedFields.push('sex');
+    if (schoolId !== undefined) changedFields.push('schoolId');
+    if (licenseId !== undefined) changedFields.push('licenseId');
+    if (vehicleType !== undefined) changedFields.push('vehicleType');
+    if (userRole !== undefined) changedFields.push('userRole');
+    
+    await logActivity(
+      req.user?.id,
+      req.user?.name || req.user?.username || 'Admin',
+      'EDITED_USER',
+      'USER',
+      user._id,
+      `${user.firstName} ${user.lastName}`,
+      `Edited ${user.role} account: ${user.firstName} ${user.lastName}. Updated fields: ${changedFields.join(', ')}`,
+      { userId: user._id, email: user.email, role: user.role, updatedFields: changedFields },
+      req.ip
+    );
+    
     res.status(StatusCodes.OK).json({
       message: 'User updated successfully',
       user: updatedUser
@@ -375,6 +455,19 @@ export const addPenaltyComment = async (req, res) => {
     
     const updatedUser = await User.findById(id).select('-password');
     
+    // Log activity
+    await logActivity(
+      req.user?.id,
+      req.user?.name || req.user?.username || 'Admin',
+      'ADDED_PENALTY',
+      'USER',
+      user._id,
+      `${user.firstName} ${user.lastName}`,
+      `Added penalty to ${user.role} account: ${user.firstName} ${user.lastName}. Reason: ${penaltyComment}. Lift date: ${penaltyLiftDate}`,
+      { userId: user._id, email: user.email, role: user.role, penaltyComment, penaltyLiftDate },
+      req.ip
+    );
+    
     res.status(StatusCodes.OK).json({
       message: 'Penalty added successfully',
       user: updatedUser
@@ -409,7 +502,28 @@ export const deleteUser = async (req, res) => {
       throw new NotFoundError(`No user found with id ${id}`);
     }
     
+    // Store user data before deletion for logging
+    const userData = {
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: user.role
+    };
+    
     await User.findByIdAndDelete(id);
+    
+    // Log activity
+    await logActivity(
+      req.user?.id,
+      req.user?.name || req.user?.username || 'Admin',
+      'DELETED_USER',
+      'USER',
+      id,
+      `${userData.firstName} ${userData.lastName}`,
+      `Deleted ${userData.role} account: ${userData.firstName} ${userData.lastName} (${userData.email})`,
+      { userId: id, email: userData.email, role: userData.role },
+      req.ip
+    );
     
     res.status(StatusCodes.OK).json({
       message: 'User deleted successfully',
@@ -425,6 +539,74 @@ export const deleteUser = async (req, res) => {
     
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ 
       message: 'Error deleting user',
+      error: error.message
+    });
+  }
+};
+
+// Get all rides for admin
+export const getAllRides = async (req, res) => {
+  try {
+    const { status, vehicle, search, startDate, endDate } = req.query;
+    const queryObject = {};
+    
+    // Filter by status
+    if (status) {
+      queryObject.status = status;
+    }
+    
+    // Filter by vehicle type
+    if (vehicle) {
+      queryObject.vehicle = vehicle;
+    }
+    
+    // Filter by date range
+    if (startDate || endDate) {
+      queryObject.createdAt = {};
+      if (startDate) {
+        queryObject.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        queryObject.createdAt.$lte = new Date(endDate);
+      }
+    }
+    
+    console.log('Fetching rides with query:', JSON.stringify(queryObject, null, 2));
+    
+    // Fetch rides with populated customer and rider data
+    let rides = await Ride.find(queryObject)
+      .populate('customer', 'firstName lastName phone email')
+      .populate('rider', 'firstName lastName phone email vehicleType')
+      .sort({ createdAt: -1 });
+    
+    // Apply search filter if provided (search in customer/rider names, OTP, addresses)
+    if (search) {
+      const searchLower = search.toLowerCase();
+      rides = rides.filter(ride => {
+        const customerName = `${ride.customer?.firstName || ''} ${ride.customer?.lastName || ''}`.toLowerCase();
+        const riderName = `${ride.rider?.firstName || ''} ${ride.rider?.lastName || ''}`.toLowerCase();
+        const otp = ride.otp || '';
+        const pickupAddress = ride.pickup?.address?.toLowerCase() || '';
+        const dropAddress = ride.drop?.address?.toLowerCase() || '';
+        
+        return customerName.includes(searchLower) ||
+               riderName.includes(searchLower) ||
+               otp.includes(searchLower) ||
+               pickupAddress.includes(searchLower) ||
+               dropAddress.includes(searchLower);
+      });
+    }
+    
+    console.log(`Found ${rides.length} rides`);
+    
+    res.status(StatusCodes.OK).json({
+      count: rides.length,
+      rides
+    });
+  } catch (error) {
+    console.error('Error fetching rides:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ 
+      message: 'Error fetching rides',
       error: error.message
     });
   }

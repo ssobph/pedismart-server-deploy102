@@ -6,7 +6,8 @@ import {
   disapproveUser, 
   updateUser, 
   deleteUser,
-  addPenaltyComment 
+  addPenaltyComment,
+  getAllRides 
 } from '../controllers/admin.js';
 import authenticateUser from '../middleware/authentication.js';
 
@@ -38,5 +39,8 @@ router.put('/users/:id/disapprove', disapproveUser);
 router.put('/users/:id/penalty', addPenaltyComment);
 router.put('/users/:id', updateUser);
 router.delete('/users/:id', deleteUser);
+
+// Ride management routes
+router.get('/rides', getAllRides);
 
 export default router;

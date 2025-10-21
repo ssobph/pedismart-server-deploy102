@@ -30,6 +30,17 @@ const ratingSchema = new Schema(
       required: false,
       trim: true,
     },
+    displayName: {
+      type: String,
+      required: false,
+      trim: true,
+      default: "Anonymous Passenger",
+      maxlength: 50,
+    },
+    isAnonymous: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,

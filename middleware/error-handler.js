@@ -1,6 +1,14 @@
 import { StatusCodes } from "http-status-codes";
 
 const errorHandlerMiddleware = (err, req, res, next) => {
+  // Log the full error for debugging
+  console.error('❌ Error Handler Caught:', {
+    name: err.name,
+    message: err.message,
+    statusCode: err.statusCode,
+    stack: err.stack,
+  });
+
   let customError = {
     statusCode: err.statusCode || StatusCodes.INTERNAL_SERVER_ERROR,
     msg: err.message || "Something went wrong, try again later",
@@ -23,7 +31,16 @@ const errorHandlerMiddleware = (err, req, res, next) => {
     customError.statusCode = 404;
   }
 
-  return res.status(customError.statusCode).json({ msg: customError.msg });
+  // In development, include stack trace
+  const response = {
+    msg: customError.msg,
+    ...(process.env.NODE_ENV === 'development' && { 
+      error: err.message,
+      stack: err.stack 
+    })
+  };
+
+  return res.status(customError.statusCode).json(response);
 };
 
 export default errorHandlerMiddleware;

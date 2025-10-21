@@ -361,38 +361,85 @@ export const refreshToken = async (req, res) => {
 
 // Get user profile information
 export const getUserProfile = async (req, res) => {
+  console.log('📝 getUserProfile called');
+  console.log('📝 req.user:', req.user);
+  
   try {
+    // Check if req.user exists
+    if (!req.user || !req.user.id) {
+      console.log('❌ No req.user or req.user.id found');
+      return res.status(StatusCodes.UNAUTHORIZED).json({
+        message: "Authentication required. Please log in again."
+      });
+    }
+
+    console.log('🔍 Looking for user with ID:', req.user.id);
     const user = await User.findById(req.user.id).select('-password');
     
     if (!user) {
-      throw new UnauthenticatedError("User not found");
+      console.log('❌ User not found in database');
+      return res.status(StatusCodes.NOT_FOUND).json({
+        message: "User not found. Please log in again."
+      });
     }
 
+    console.log('✅ User found:', user.email);
     res.status(StatusCodes.OK).json({
       user
     });
   } catch (error) {
-    console.error(error);
-    throw error;
+    console.error('❌ Error fetching profile:', error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: "Error fetching profile",
+      error: error.message
+    });
   }
 };
 
 // Update user profile information
 export const updateUserProfile = async (req, res) => {
-  const { firstName, middleName, lastName, phone, schoolId, licenseId, email, sex, vehicleType } = req.body;
+  const { name, firstName, middleName, lastName, phone, schoolId, licenseId, email, sex, vehicleType } = req.body;
 
   try {
+    // Check if req.user exists
+    if (!req.user || !req.user.id) {
+      return res.status(StatusCodes.UNAUTHORIZED).json({
+        message: "Authentication required. Please log in again."
+      });
+    }
+
     const user = await User.findById(req.user.id);
     
     if (!user) {
-      throw new UnauthenticatedError("User not found");
+      return res.status(StatusCodes.NOT_FOUND).json({
+        message: "User not found. Please log in again."
+      });
     }
 
-    // Update fields if provided
-    if (firstName) user.firstName = firstName;
-    if (middleName !== undefined) user.middleName = middleName;
-    if (lastName) user.lastName = lastName;
-    if (phone) {
+    // Handle single name field (split into firstName and lastName)
+    if (name) {
+      const nameParts = name.trim().split(/\s+/);
+      if (nameParts.length === 1) {
+        user.firstName = nameParts[0];
+        user.middleName = '';
+        user.lastName = '';
+      } else if (nameParts.length === 2) {
+        user.firstName = nameParts[0];
+        user.middleName = '';
+        user.lastName = nameParts[1];
+      } else {
+        user.firstName = nameParts[0];
+        user.middleName = nameParts.slice(1, -1).join(' ');
+        user.lastName = nameParts[nameParts.length - 1];
+      }
+    }
+
+    // Update fields if provided (legacy support)
+    if (firstName && !name) user.firstName = firstName;
+    if (middleName !== undefined && !name) user.middleName = middleName;
+    if (lastName && !name) user.lastName = lastName;
+    // Phone update removed for admin users
+    if (phone && user.role !== 'admin') {
       // Check if phone is already in use by another user with same role
       const existingPhoneUser = await User.findOne({ 
         phone, 
@@ -433,28 +480,38 @@ export const updateUserProfile = async (req, res) => {
       user.vehicleType = vehicleType;
       console.log(`✅ Updated vehicle type for rider ${user._id} to: ${vehicleType}`);
     }
-    
-    if (email) {
-      // Check if email is already in use by another user
-      const existingUser = await User.findOne({ email, _id: { $ne: req.user.id } });
-      if (existingUser) {
-        throw new BadRequestError("Email already in use");
-      }
-      user.email = email;
-    }
 
     await user.save();
 
-    // Return updated user without password
-    const updatedUser = await User.findById(req.user.id).select('-password');
+    // Return user without password
+    const userResponse = user.toObject();
+    delete userResponse.password;
 
     res.status(StatusCodes.OK).json({
       message: "Profile updated successfully",
-      user: updatedUser
+      user: userResponse
     });
   } catch (error) {
-    console.error(error);
-    throw error;
+    console.error('Error updating profile:', error);
+    
+    // Handle specific error types
+    if (error.name === 'ValidationError') {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        message: "Validation error",
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+    
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        message: error.message
+      });
+    }
+    
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: "Error updating profile",
+      error: error.message
+    });
   }
 };
 

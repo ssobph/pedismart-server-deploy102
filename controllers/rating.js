@@ -7,7 +7,7 @@ import mongoose from "mongoose";
 
 // Create a new rating
 export const createRating = async (req, res) => {
-  const { rideId, rating, comment } = req.body;
+  const { rideId, rating, comment, displayName } = req.body;
   const customerId = req.user.id;
 
   if (!rideId || !rating) {
@@ -30,8 +30,9 @@ export const createRating = async (req, res) => {
       throw new BadRequestError("Cannot rate a ride that is not completed");
     }
 
+    // CRITICAL: Validate that the customer was actually in this completed ride
     if (ride.customer.toString() !== customerId) {
-      throw new BadRequestError("You can only rate rides you have taken");
+      throw new BadRequestError("You can only rate rides you have taken. This ensures only legitimate passengers can rate.");
     }
 
     if (!ride.rider) {
@@ -48,6 +49,9 @@ export const createRating = async (req, res) => {
       // Update existing rating
       existingRating.rating = rating;
       existingRating.comment = comment || existingRating.comment;
+      // Update display name if provided, otherwise keep anonymous
+      existingRating.displayName = displayName?.trim() || "Anonymous Passenger";
+      existingRating.isAnonymous = !displayName?.trim();
       await existingRating.save();
 
       res.status(StatusCodes.OK).json({
@@ -55,13 +59,15 @@ export const createRating = async (req, res) => {
         rating: existingRating
       });
     } else {
-      // Create new rating
+      // Create new rating with anonymous display name
       const newRating = new Rating({
         ride: rideId,
-        customer: customerId,
+        customer: customerId, // Keep for validation, but don't expose to riders
         rider: ride.rider,
         rating,
-        comment
+        comment,
+        displayName: displayName?.trim() || "Anonymous Passenger",
+        isAnonymous: !displayName?.trim()
       });
 
       await newRating.save();
@@ -83,8 +89,9 @@ export const getRiderRatings = async (req, res) => {
 
   try {
     // First, find all ratings for this rider
+    // CRITICAL: Do NOT populate customer details to maintain anonymity
     const ratings = await Rating.find({ rider: riderId })
-      .populate("customer", "firstName lastName")
+      .select("-customer") // Exclude customer field for anonymity
       .populate({
         path: "ride",
         select: "vehicle distance fare pickup drop createdAt"
@@ -134,8 +141,9 @@ export const getMyRatings = async (req, res) => {
 
   try {
     // First, find all ratings for this rider
+    // CRITICAL: Do NOT populate customer details to maintain anonymity
     const ratings = await Rating.find({ rider: riderId })
-      .populate("customer", "firstName lastName")
+      .select("-customer") // Exclude customer field for anonymity
       .populate({
         path: "ride",
         select: "vehicle distance fare pickup drop createdAt"

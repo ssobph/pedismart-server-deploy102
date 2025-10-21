@@ -225,16 +225,41 @@ export const cancelRide = async (req, res) => {
       ? `${ride.customer.firstName} ${ride.customer.lastName}` 
       : `${ride.rider?.firstName} ${ride.rider?.lastName}`;
 
-    // Update ride status to CANCELLED instead of deleting
-    ride.status = "CANCELLED";
-    ride.cancelledBy = cancelledBy;
-    ride.cancelledAt = new Date();
+    // If rider cancelled, add them to blacklist so they never see this ride again
+    if (cancelledBy === "rider") {
+      if (!ride.blacklistedRiders) {
+        ride.blacklistedRiders = [];
+      }
+      if (!ride.blacklistedRiders.includes(userId)) {
+        ride.blacklistedRiders.push(userId);
+        console.log(`🚫 Rider ${userId} added to blacklist for ride ${rideId} - they will not see this ride again`);
+      }
+      
+      // If ride was still searching, reset it so other riders can accept
+      if (ride.status === "SEARCHING_FOR_RIDER") {
+        ride.rider = null;
+        console.log(`♻️ Ride ${rideId} reset to SEARCHING_FOR_RIDER for other riders (excluding blacklisted rider ${userId})`);
+      } else {
+        // If ride was already accepted (START/ARRIVED), mark as CANCELLED
+        ride.status = "CANCELLED";
+        ride.cancelledBy = cancelledBy;
+        ride.cancelledAt = new Date();
+        console.log(`🚫 Ride ${rideId} marked as CANCELLED by rider ${userId}`);
+      }
+    } else {
+      // Customer cancelled - mark ride as CANCELLED
+      ride.status = "CANCELLED";
+      ride.cancelledBy = cancelledBy;
+      ride.cancelledAt = new Date();
+      console.log(`🚫 Ride ${rideId} cancelled by customer ${userId}, status updated to CANCELLED`);
+    }
+    
     await ride.save();
-
-    console.log(`🚫 Ride ${rideId} cancelled by ${cancelledBy} (${userId}), status updated to CANCELLED`);
 
     // Broadcast cancellation to all relevant parties
     if (req.io) {
+      console.log(`📢 Broadcasting cancellation for ride ${rideId} to all connected parties`);
+      
       // Emit to ride room
       req.io.to(`ride_${rideId}`).emit("rideCanceled", { 
         message: "Ride has been cancelled",
@@ -242,6 +267,8 @@ export const cancelRide = async (req, res) => {
         cancelledBy: cancelledBy,
         cancellerName: cancellerName
       });
+      
+      console.log(`✅ Emitted rideCanceled to ride room: ride_${rideId}`);
       
       // If passenger cancelled after driver accepted, send alert to driver
       if (cancelledBy === "customer" && ride.rider && ride.status !== "SEARCHING_FOR_RIDER") {
@@ -275,18 +302,36 @@ export const cancelRide = async (req, res) => {
             ride: ride
           });
         }
+        
+        // If rider cancelled and ride is still SEARCHING (reset for other riders),
+        // only remove it from the cancelling rider's screen
+        if (ride.status === "SEARCHING_FOR_RIDER") {
+          const cancellingRiderSocket = [...req.io.sockets.sockets.values()].find(
+            socket => socket.user?.id === userId
+          );
+          
+          if (cancellingRiderSocket) {
+            console.log(`🚫 Removing ride ${rideId} from cancelling rider ${userId}'s screen only`);
+            cancellingRiderSocket.emit("rideRemovedForYou", rideId);
+          }
+        } else {
+          // If ride was fully cancelled (not reset), remove from all riders
+          req.io.to("onDuty").emit("rideOfferCanceled", rideId);
+        }
+      } else {
+        // Customer cancelled or ride fully cancelled - remove from all riders
+        console.log(`🚫 Customer cancelled ride ${rideId} - removing from ALL on-duty riders' screens`);
+        req.io.to("onDuty").emit("rideOfferCanceled", rideId);
+        console.log(`✅ Emitted rideOfferCanceled to onDuty room for ride ${rideId}`);
+        
+        // Also emit rideCanceled with ride data for additional handling
+        req.io.to("onDuty").emit("rideCanceled", {
+          rideId: rideId,
+          ride: ride,
+          cancelledBy: cancelledBy
+        });
+        console.log(`✅ Emitted rideCanceled to onDuty room for ride ${rideId}`);
       }
-      
-      // IMMEDIATELY remove from all on-duty riders' lists
-      req.io.to("onDuty").emit("rideOfferCanceled", rideId);
-      
-      // Also broadcast rideCanceled to ensure all listeners receive it
-      req.io.to("onDuty").emit("rideCanceled", { 
-        ride: ride,
-        rideId: rideId,
-        cancelledBy: cancelledBy,
-        cancellerName: cancellerName
-      });
       
       console.log(`📢 Broadcasted ride ${rideId} cancellation to all relevant parties`);
     }
@@ -333,16 +378,35 @@ export const getMyRides = async (req, res) => {
 
 export const getSearchingRides = async (req, res) => {
   try {
-    const searchingRides = await Ride.find({ 
-      status: "SEARCHING_FOR_RIDER" 
+    const riderId = req.user.id;
+    
+    // Get rider's vehicle type from database (for logging purposes)
+    const User = (await import('../models/User.js')).default;
+    const rider = await User.findById(riderId).select('vehicleType');
+    const riderVehicleType = rider?.vehicleType || "Unknown";
+    
+    // Return ALL searching rides (client will handle visual feedback for mismatched rides)
+    // Only rides with SEARCHING_FOR_RIDER status (cancelled/timeout rides have different status)
+    const allRides = await Ride.find({ 
+      status: "SEARCHING_FOR_RIDER"
     }).populate("customer", "firstName lastName phone");
     
-    console.log(`API: Found ${searchingRides.length} searching rides`);
+    console.log(`API: Found ${allRides.length} searching rides (ALL vehicle types) for rider ${riderId} (vehicle: ${riderVehicleType})`);
+    
+    // Log vehicle type breakdown
+    if (allRides.length > 0) {
+      const vehicleBreakdown = allRides.reduce((acc, ride) => {
+        acc[ride.vehicle] = (acc[ride.vehicle] || 0) + 1;
+        return acc;
+      }, {});
+      console.log(`API: Vehicle types: ${JSON.stringify(vehicleBreakdown)}`);
+    }
     
     res.status(StatusCodes.OK).json({
-      message: "Searching rides retrieved successfully",
-      count: searchingRides.length,
-      rides: searchingRides,
+      message: "Searching rides retrieved successfully (ALL vehicle types)",
+      count: allRides.length,
+      rides: allRides,
+      riderVehicleType: riderVehicleType,
     });
   } catch (error) {
     console.error("Error retrieving searching rides:", error);

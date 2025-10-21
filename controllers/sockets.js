@@ -3,6 +3,8 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import Ride from "../models/Ride.js";
 import Rating from "../models/Rating.js";
+import Chat from "../models/Chat.js";
+import Message from "../models/Message.js";
 
 const onDutyRiders = new Map();
 
@@ -67,13 +69,17 @@ const handleSocketConnection = (io) => {
         console.log(`✅ Rider ${user.id} is now on duty with vehicle: ${riderInfo?.vehicleType || "Tricycle"}`);
         console.log(`👥 Total on-duty riders: ${onDutyRiders.size}`);
         
-        // Immediately send all searching rides to the newly on-duty rider
+        // Immediately send ALL searching rides to the newly on-duty rider (client will handle visual feedback for mismatched rides)
         try {
+          const riderVehicleType = riderInfo?.vehicleType || "Tricycle";
+          // Only get rides with SEARCHING_FOR_RIDER status (cancelled/timeout rides have different status)
+          // Filter out rides where this rider is blacklisted
           const searchingRides = await Ride.find({ 
-            status: "SEARCHING_FOR_RIDER" 
+            status: "SEARCHING_FOR_RIDER",
+            blacklistedRiders: { $ne: user.id } // Exclude rides where rider is blacklisted
           }).populate("customer", "firstName lastName phone");
           
-          console.log(`📤 Sending ${searchingRides.length} searching rides to newly on-duty rider ${user.id}`);
+          console.log(`📤 Sending ${searchingRides.length} searching rides (ALL vehicle types) to newly on-duty rider ${user.id} (vehicle: ${riderVehicleType})`);
           
           // Force a small delay to ensure socket is ready (helps with race conditions)
           setTimeout(() => {
@@ -87,13 +93,22 @@ const handleSocketConnection = (io) => {
                 socket.emit("newRideRequest", ride);
               });
               
-              // Log the ride IDs
+              // Log the ride IDs and vehicle types
               const rideIds = searchingRides.map(r => r._id.toString());
               console.log(`📝 Ride IDs: ${rideIds.join(', ')}`);
+              
+              // Log vehicle type breakdown
+              const vehicleBreakdown = searchingRides.reduce((acc, ride) => {
+                acc[ride.vehicle] = (acc[ride.vehicle] || 0) + 1;
+                return acc;
+              }, {});
+              console.log(`🚗 Vehicle types: ${JSON.stringify(vehicleBreakdown)}`);
+            } else {
+              console.log(`🚧 No searching rides found for newly on-duty rider ${user.id}`);
             }
             
             // Confirm successful send
-            console.log(`✅ Successfully sent rides to newly on-duty rider ${user.id}`);
+            console.log(`✅ Successfully sent ${searchingRides.length} rides to newly on-duty rider ${user.id}`);
           }, 500); // Small delay to ensure socket is ready
         } catch (error) {
           console.error("❌ Error sending rides to newly on-duty rider:", error);
@@ -132,15 +147,17 @@ const handleSocketConnection = (io) => {
           const vehicleType = riderUser?.vehicleType || "Single Motorcycle";
           console.log(`🚗 Rider ${user.id} vehicle type: ${vehicleType}`);
           
-          // Find all rides with SEARCHING_FOR_RIDER status that match rider's vehicle type
+          // Find ALL rides with SEARCHING_FOR_RIDER status (NO vehicle filter - client will handle visual feedback)
+          // Only rides with SEARCHING_FOR_RIDER status (cancelled/timeout rides have different status)
+          // Filter out rides where this rider is blacklisted
           const searchingRides = await Ride.find({ 
             status: "SEARCHING_FOR_RIDER",
-            vehicle: vehicleType // PRE-FILTER by vehicle type on server
+            blacklistedRiders: { $ne: user.id } // Exclude rides where rider is blacklisted
           }).populate("customer", "firstName lastName phone");
           
-          console.log(`📋 Found ${searchingRides.length} searching rides matching ${vehicleType} for rider ${user.id}`);
+          console.log(`📋 Found ${searchingRides.length} searching rides (ALL vehicle types) for rider ${user.id}`);
           
-          // Send filtered rides to the rider
+          // Send all rides to the rider
           console.log(`📤 Emitting ${searchingRides.length} rides to rider ${user.id}`);
           
           // Force a small delay to ensure socket is ready (helps with race conditions)
@@ -155,12 +172,19 @@ const handleSocketConnection = (io) => {
               const rideIds = searchingRides.map(r => r._id.toString());
               console.log(`📝 Ride IDs: ${rideIds.join(', ')}`);
               
+              // Log vehicle type breakdown
+              const vehicleBreakdown = searchingRides.reduce((acc, ride) => {
+                acc[ride.vehicle] = (acc[ride.vehicle] || 0) + 1;
+                return acc;
+              }, {});
+              console.log(`🚗 Vehicle types: ${JSON.stringify(vehicleBreakdown)}`);
+              
               // Log more details about each ride
               searchingRides.forEach(ride => {
                 console.log(`📍 Ride ${ride._id}: ${ride.pickup?.address} to ${ride.drop?.address}, Vehicle: ${ride.vehicle}, Fare: ${ride.fare}`);
               });
             } else {
-              console.log(`🚧 No searching rides matching ${vehicleType} found for rider ${user.id}`);
+              console.log(`🚧 No searching rides found for rider ${user.id}`);
             }
           }, 100); // Small delay to ensure socket is ready
         } catch (error) {
@@ -230,35 +254,53 @@ const handleSocketConnection = (io) => {
           let retries = 0;
           let rideAccepted = false;
           let canceled = false;
-          const MAX_RETRIES = 20;
+          const MAX_RETRIES = 60; // Increased from 20 to 60 (10 minutes instead of 3.3 minutes)
 
           const retrySearch = async () => {
             if (canceled) return;
             
-            // Check if ride has been completed in the meantime
+            // CRITICAL: Check ride status in database before every retry
             const currentRide = await Ride.findById(rideId);
-            if (currentRide && currentRide.status === "COMPLETED") {
-              console.log(`🔒 Ride ${rideId} is now COMPLETED - stopping retry interval`);
+            
+            // If ride doesn't exist or has been accepted/completed, stop the interval
+            if (!currentRide) {
+              console.log(`🔒 Ride ${rideId} no longer exists - stopping retry interval`);
               clearInterval(retryInterval);
               return;
             }
             
+            // If ride status is anything other than SEARCHING_FOR_RIDER, stop the interval
+            if (currentRide.status !== "SEARCHING_FOR_RIDER") {
+              console.log(`🔒 Ride ${rideId} status is ${currentRide.status} (not SEARCHING) - stopping retry interval`);
+              clearInterval(retryInterval);
+              rideAccepted = true; // Mark as accepted to prevent timeout
+              return;
+            }
+            
             retries++;
+            console.log(`🔄 Retry ${retries}/${MAX_RETRIES} for ride ${rideId}`);
 
             const riders = sendNearbyRiders(socket, { latitude: pickupLat, longitude: pickupLon }, ride);
             if (riders.length > 0 || retries >= MAX_RETRIES) {
               clearInterval(retryInterval);
               if (!rideAccepted && retries >= MAX_RETRIES) {
-                // ✅ FIXED: Update status to TIMEOUT instead of deleting, but protect COMPLETED rides
+                // Double-check ride status before timing out
+                const finalCheck = await Ride.findById(rideId);
+                if (!finalCheck || finalCheck.status !== "SEARCHING_FOR_RIDER") {
+                  console.log(`🔒 Ride ${rideId} was accepted during final check - NOT timing out`);
+                  return;
+                }
+                // ✅ FIXED: Update status to TIMEOUT instead of deleting, but ONLY if still SEARCHING
                 const timeoutRide = await Ride.findById(rideId);
                 if (timeoutRide) {
-                  // CRITICAL: Never change a COMPLETED ride's status
-                  if (timeoutRide.status === "COMPLETED") {
-                    console.log(`🔒 Ride ${rideId} is COMPLETED - protected from status change to TIMEOUT`);
+                  // CRITICAL: Only timeout if ride is still SEARCHING_FOR_RIDER
+                  if (timeoutRide.status !== "SEARCHING_FOR_RIDER") {
+                    console.log(`🔒 Ride ${rideId} status is ${timeoutRide.status} - NOT timing out (ride was accepted/completed)`);
                   } else {
+                    // Ride is still searching after max retries - mark as TIMEOUT
                     timeoutRide.status = "TIMEOUT";
                     await timeoutRide.save();
-                    console.log(`🕐 Ride ${rideId} timed out - status updated to TIMEOUT (NOT DELETED)`);
+                    console.log(`🕐 Ride ${rideId} timed out after ${MAX_RETRIES} retries - status updated to TIMEOUT`);
                     
                     // Broadcast ride timeout to all on-duty riders
                     io.to("onDuty").emit("rideOfferTimeout", rideId);
@@ -336,18 +378,20 @@ const handleSocketConnection = (io) => {
                   }
                 }
                 
-                // IMMEDIATELY broadcast to all on-duty riders to remove from their lists
+                // Remove from ALL on-duty riders' screens immediately
+                console.log(`🚫 Customer cancelled ride ${rideId} via socket - removing from ALL on-duty riders' screens`);
                 io.to("onDuty").emit("rideOfferCanceled", rideId);
+                console.log(`✅ Emitted rideOfferCanceled to onDuty room for ride ${rideId}`);
                 
-                // Also emit rideCanceled to ensure all listeners receive it
-                io.to("onDuty").emit("rideCanceled", { 
-                  ride: cancelRide,
+                // Also emit rideCanceled with full data for comprehensive handling
+                io.to("onDuty").emit("rideCanceled", {
                   rideId: rideId,
+                  ride: cancelRide,
                   cancelledBy: "customer",
                   cancellerName: cancellerName
                 });
-                
-                console.log(`📢 IMMEDIATELY broadcasted cancellation of ride ${rideId} to all on-duty riders`);
+                console.log(`✅ Emitted rideCanceled to onDuty room for ride ${rideId}`);
+                console.log(`📢 Successfully removed ride ${rideId} from all on-duty riders' screens`);
               }
             }
             
@@ -387,6 +431,472 @@ const handleSocketConnection = (io) => {
       socket.leave(`ride_${rideId}`);
       console.log(`✅ User ${user.id} successfully left ride room ${rideId}`);
     });
+
+    // ============ CHAT SOCKET EVENTS ============
+    
+    // Join a chat room
+    socket.on("joinChat", (chatId) => {
+      console.log(`💬 User ${user.id} (${user.role}) joining chat room ${chatId}`);
+      socket.join(`chat_${chatId}`);
+      console.log(`✅ User ${user.id} joined chat room ${chatId}`);
+    });
+
+    // Leave a chat room
+    socket.on("leaveChat", (chatId) => {
+      console.log(`💬 User ${user.id} (${user.role}) leaving chat room ${chatId}`);
+      socket.leave(`chat_${chatId}`);
+      console.log(`✅ User ${user.id} left chat room ${chatId}`);
+    });
+
+    // Send a message in real-time
+    socket.on("sendMessage", async (data) => {
+      try {
+        const { chatId, content } = data;
+        console.log(`💬 User ${user.id} sending message in chat ${chatId}`);
+
+        // Verify user is participant in this chat
+        const chat = await Chat.findOne({
+          _id: chatId,
+          "participants.userId": user.id,
+        });
+
+        if (!chat) {
+          socket.emit("error", { message: "Chat not found or access denied" });
+          return;
+        }
+
+        // Create message
+        const message = await Message.create({
+          chatId,
+          sender: {
+            userId: user.id,
+            role: user.role,
+          },
+          content: content.trim(),
+          messageType: "text",
+        });
+
+        // Update chat's last message
+        chat.lastMessage = message._id;
+        chat.lastMessageTime = message.createdAt;
+
+        // Increment unread count for the other participant
+        const otherParticipantRole = user.role === "customer" ? "rider" : "customer";
+        chat.unreadCount[otherParticipantRole] += 1;
+
+        await chat.save();
+
+        // Populate message
+        const populatedMessage = await Message.findById(message._id).populate(
+          "sender.userId",
+          "firstName lastName photo"
+        );
+
+        // Broadcast message to all users in the chat room
+        io.to(`chat_${chatId}`).emit("newMessage", populatedMessage);
+
+        // Also send to both participants directly (fallback)
+        for (const participant of chat.participants) {
+          const participantSockets = await io.in(`user_${participant.userId}`).fetchSockets();
+          participantSockets.forEach(sock => {
+            sock.emit("newMessage", populatedMessage);
+          });
+        }
+
+        // Send unread count update to the recipient (other participant)
+        const otherParticipant = chat.participants.find(p => p.userId.toString() !== user.id);
+        if (otherParticipant) {
+          // Calculate total unread count for the recipient across all their chats
+          const recipientChats = await Chat.find({
+            "participants.userId": otherParticipant.userId,
+          });
+          
+          const totalUnread = recipientChats.reduce((sum, c) => {
+            return sum + (c.unreadCount[otherParticipant.role] || 0);
+          }, 0);
+
+          // Emit unread count update to recipient's personal room
+          io.to(`user_${otherParticipant.userId}`).emit("unreadCountUpdate", {
+            unreadCount: totalUnread,
+            chatId: chatId,
+          });
+          
+          console.log(`🔔 Sent unread count update to user ${otherParticipant.userId}: ${totalUnread} unread messages`);
+        }
+
+        console.log(`✅ Message sent in chat ${chatId}: ${message._id}`);
+      } catch (error) {
+        console.error(`❌ Error sending message:`, error);
+        socket.emit("error", { message: "Failed to send message" });
+      }
+    });
+
+    // Broadcast image message after upload (called from REST API)
+    socket.on("broadcastImageMessage", async (data) => {
+      try {
+        const { messageId, chatId } = data;
+        console.log(`📸 Broadcasting image message ${messageId} in chat ${chatId}`);
+
+        // Get the populated message
+        const populatedMessage = await Message.findById(messageId).populate(
+          "sender.userId",
+          "firstName lastName photo"
+        );
+
+        if (!populatedMessage) {
+          console.error(`❌ Message ${messageId} not found`);
+          return;
+        }
+
+        // Get chat for unread count update
+        const chat = await Chat.findById(chatId);
+        if (!chat) {
+          console.error(`❌ Chat ${chatId} not found`);
+          return;
+        }
+
+        // Broadcast message to all users in the chat room
+        io.to(`chat_${chatId}`).emit("newMessage", populatedMessage);
+
+        // Also send to both participants directly (fallback)
+        for (const participant of chat.participants) {
+          const participantSockets = await io.in(`user_${participant.userId}`).fetchSockets();
+          participantSockets.forEach(sock => {
+            sock.emit("newMessage", populatedMessage);
+          });
+        }
+
+        // Send unread count update to the recipient (other participant)
+        const senderId = populatedMessage.sender.userId._id.toString();
+        const otherParticipant = chat.participants.find(p => p.userId.toString() !== senderId);
+        
+        if (otherParticipant) {
+          // Calculate total unread count for the recipient across all their chats
+          const recipientChats = await Chat.find({
+            "participants.userId": otherParticipant.userId,
+          });
+          
+          const totalUnread = recipientChats.reduce((sum, c) => {
+            return sum + (c.unreadCount[otherParticipant.role] || 0);
+          }, 0);
+
+          // Emit unread count update to recipient's personal room
+          io.to(`user_${otherParticipant.userId}`).emit("unreadCountUpdate", {
+            unreadCount: totalUnread,
+            chatId: chatId,
+          });
+          
+          console.log(`🔔 Sent unread count update to user ${otherParticipant.userId}: ${totalUnread} unread messages`);
+        }
+
+        console.log(`✅ Image message broadcasted in chat ${chatId}`);
+      } catch (error) {
+        console.error(`❌ Error broadcasting image message:`, error);
+      }
+    });
+
+    // User is typing indicator
+    socket.on("typing", (data) => {
+      const { chatId, isTyping } = data;
+      console.log(`⌨️ User ${user.id} ${isTyping ? 'started' : 'stopped'} typing in chat ${chatId}`);
+      
+      // Broadcast to other users in the chat
+      socket.to(`chat_${chatId}`).emit("userTyping", {
+        userId: user.id,
+        role: user.role,
+        isTyping,
+      });
+    });
+
+    // Mark messages as read in real-time
+    socket.on("markAsRead", async (data) => {
+      try {
+        const { chatId } = data;
+        console.log(`💬 User ${user.id} marking messages as read in chat ${chatId}`);
+
+        const chat = await Chat.findOne({
+          _id: chatId,
+          "participants.userId": user.id,
+        });
+
+        if (!chat) {
+          socket.emit("error", { message: "Chat not found" });
+          return;
+        }
+
+        // Get unread messages
+        const unreadMessages = await Message.find({
+          chatId,
+          "sender.userId": { $ne: user.id },
+          "readBy.userId": { $ne: user.id },
+          isDeleted: false,
+        });
+
+        // Mark messages as read
+        for (const message of unreadMessages) {
+          message.readBy.push({
+            userId: user.id,
+            readAt: new Date(),
+          });
+          await message.save();
+        }
+
+        // Reset unread count
+        chat.unreadCount[user.role] = 0;
+        await chat.save();
+
+        // Notify other participants
+        socket.to(`chat_${chatId}`).emit("messagesRead", {
+          chatId,
+          userId: user.id,
+          count: unreadMessages.length,
+        });
+
+        // Calculate and send updated unread count to current user
+        const userChats = await Chat.find({
+          "participants.userId": user.id,
+        });
+        
+        const totalUnread = userChats.reduce((sum, c) => {
+          return sum + (c.unreadCount[user.role] || 0);
+        }, 0);
+
+        // Emit unread count update to current user's personal room
+        io.to(`user_${user.id}`).emit("unreadCountUpdate", {
+          unreadCount: totalUnread,
+          chatId: chatId,
+        });
+        
+        console.log(`🔔 Sent unread count update to user ${user.id}: ${totalUnread} unread messages`);
+        console.log(`✅ Marked ${unreadMessages.length} messages as read in chat ${chatId}`);
+      } catch (error) {
+        console.error(`❌ Error marking messages as read:`, error);
+        socket.emit("error", { message: "Failed to mark messages as read" });
+      }
+    });
+
+    // Get online status
+    socket.on("checkOnlineStatus", async (data) => {
+      const { userId } = data;
+      const userSockets = await io.in(`user_${userId}`).fetchSockets();
+      const isOnline = userSockets.length > 0;
+      
+      socket.emit("onlineStatus", {
+        userId,
+        isOnline,
+      });
+    });
+
+    // Join user's personal room for direct messaging
+    socket.join(`user_${user.id}`);
+    console.log(`👤 User ${user.id} joined personal room`);
+
+    // Fetch messages for a chat via socket
+    socket.on("fetchMessages", async (data) => {
+      try {
+        const { chatId, page = 1, limit = 50 } = data;
+        console.log(`💬 Socket: Fetching messages for chat ${chatId}, page ${page}`);
+
+        // Verify user is participant in this chat
+        const chat = await Chat.findOne({
+          _id: chatId,
+          "participants.userId": user.id,
+        });
+
+        if (!chat) {
+          socket.emit("messagesError", { message: "Chat not found or you don't have access" });
+          return;
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const messages = await Message.find({
+          chatId,
+          isDeleted: false,
+        })
+          .populate("sender.userId", "firstName lastName photo")
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit));
+
+        const totalMessages = await Message.countDocuments({
+          chatId,
+          isDeleted: false,
+        });
+
+        console.log(`✅ Socket: Found ${messages.length} messages (total: ${totalMessages})`);
+
+        socket.emit("messagesFetched", {
+          messages: messages.reverse(), // Reverse to show oldest first
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total: totalMessages,
+            hasMore: skip + messages.length < totalMessages,
+          },
+        });
+      } catch (error) {
+        console.error(`❌ Socket: Error fetching messages:`, error);
+        socket.emit("messagesError", { message: "Failed to fetch messages", error: error.message });
+      }
+    });
+
+    // Mark messages as read via socket
+    socket.on("markMessagesRead", async (data) => {
+      try {
+        const { chatId } = data;
+        console.log(`💬 Socket: User ${user.id} marking messages as read in chat ${chatId}`);
+
+        const chat = await Chat.findOne({
+          _id: chatId,
+          "participants.userId": user.id,
+        });
+
+        if (!chat) {
+          socket.emit("markReadError", { message: "Chat not found" });
+          return;
+        }
+
+        // Get unread messages
+        const unreadMessages = await Message.find({
+          chatId,
+          "sender.userId": { $ne: user.id },
+          "readBy.userId": { $ne: user.id },
+          isDeleted: false,
+        });
+
+        // Mark messages as read
+        for (const message of unreadMessages) {
+          message.readBy.push({
+            userId: user.id,
+            readAt: new Date(),
+          });
+          await message.save();
+        }
+
+        // Reset unread count
+        chat.unreadCount[user.role] = 0;
+        await chat.save();
+
+        // Notify other participants
+        socket.to(`chat_${chatId}`).emit("messagesRead", {
+          chatId,
+          userId: user.id,
+          count: unreadMessages.length,
+        });
+
+        socket.emit("markReadSuccess", {
+          chatId,
+          count: unreadMessages.length,
+        });
+
+        // Calculate and send updated unread count to current user
+        const userChats = await Chat.find({
+          "participants.userId": user.id,
+        });
+        
+        const totalUnread = userChats.reduce((sum, c) => {
+          return sum + (c.unreadCount[user.role] || 0);
+        }, 0);
+
+        // Emit unread count update to current user's personal room
+        io.to(`user_${user.id}`).emit("unreadCountUpdate", {
+          unreadCount: totalUnread,
+          chatId: chatId,
+        });
+        
+        console.log(`🔔 Socket: Sent unread count update to user ${user.id}: ${totalUnread} unread messages`);
+        console.log(`✅ Socket: Marked ${unreadMessages.length} messages as read in chat ${chatId}`);
+      } catch (error) {
+        console.error(`❌ Socket: Error marking messages as read:`, error);
+        socket.emit("markReadError", { message: "Failed to mark messages as read", error: error.message });
+      }
+    });
+
+    // Get or create chat via socket
+    socket.on("getOrCreateChat", async (data) => {
+      try {
+        const { otherUserId, otherUserRole } = data;
+        const currentUserId = user.id;
+        const currentUserRole = user.role;
+
+        console.log(`💬 Socket: Getting/Creating chat between ${currentUserId} (${currentUserRole}) and ${otherUserId} (${otherUserRole})`);
+
+        // Validate that user is not trying to chat with themselves
+        if (currentUserId === otherUserId) {
+          console.log(`❌ Socket: User trying to chat with themselves`);
+          socket.emit("chatError", { message: "Cannot create chat with yourself" });
+          return;
+        }
+
+        // Check if chat already exists
+        let chat = await Chat.findOne({
+          "participants.userId": { $all: [currentUserId, otherUserId] },
+        })
+          .populate("participants.userId", "firstName lastName photo role vehicleType")
+          .populate({
+            path: "lastMessage",
+            select: "content createdAt sender",
+          });
+
+        if (chat) {
+          console.log(`✅ Socket: Found existing chat: ${chat._id}`);
+          console.log(`📋 Socket: Chat participants:`, chat.participants.map(p => ({
+            userId: p.userId?._id,
+            name: `${p.userId?.firstName} ${p.userId?.lastName}`,
+            role: p.role
+          })));
+          socket.emit("chatCreated", { chat });
+          return;
+        }
+
+        // Create new chat
+        console.log(`🆕 Socket: Creating new chat with participants:`, [
+          { userId: currentUserId, role: currentUserRole },
+          { userId: otherUserId, role: otherUserRole }
+        ]);
+        
+        chat = await Chat.create({
+          participants: [
+            { userId: currentUserId, role: currentUserRole },
+            { userId: otherUserId, role: otherUserRole },
+          ],
+        });
+
+        console.log(`💾 Socket: Chat created in DB with ID: ${chat._id}`);
+
+        // Verify chat was saved by querying it back
+        const verifyChat = await Chat.findById(chat._id);
+        console.log(`🔍 Socket: Verification - Chat exists in DB:`, !!verifyChat);
+        console.log(`🔍 Socket: Verification - Participants:`, verifyChat?.participants);
+
+        // Populate the newly created chat
+        chat = await Chat.findById(chat._id)
+          .populate("participants.userId", "firstName lastName photo role vehicleType")
+          .populate("lastMessage");
+
+        console.log(`✅ Socket: Created new chat: ${chat._id}`);
+        console.log(`📋 Socket: New chat participants:`, chat.participants.map(p => ({
+          userId: p.userId?._id,
+          name: `${p.userId?.firstName} ${p.userId?.lastName}`,
+          role: p.role
+        })));
+        
+        // Verify both users can find this chat
+        const currentUserChats = await Chat.find({ "participants.userId": currentUserId });
+        const otherUserChats = await Chat.find({ "participants.userId": otherUserId });
+        console.log(`🔍 Socket: Current user (${currentUserId}) has ${currentUserChats.length} chats`);
+        console.log(`🔍 Socket: Other user (${otherUserId}) has ${otherUserChats.length} chats`);
+        
+        socket.emit("chatCreated", { chat });
+      } catch (error) {
+        console.error(`❌ Socket: Error creating chat:`, error);
+        console.error(`❌ Socket: Error stack:`, error.stack);
+        socket.emit("chatError", { message: "Failed to create chat", error: error.message });
+      }
+    });
+
+    // ============ END CHAT SOCKET EVENTS ============
 
     socket.on("disconnect", () => {
       if (user.role === "rider") onDutyRiders.delete(user.id);
@@ -481,10 +991,10 @@ const handleSocketConnection = (io) => {
   });
 };
 
-// Function to broadcast new ride requests to all on-duty riders
+// Function to broadcast new ride requests to ALL on-duty riders (client will handle visual feedback for mismatched rides)
 export const broadcastNewRideRequest = async (io, rideData) => {
   try {
-    console.log(`🚨 Broadcasting new ride request ${rideData._id} to all on-duty riders`);
+    console.log(`🚨 Broadcasting new ride request ${rideData._id} to ALL on-duty riders`);
     
     // Populate the ride data with customer info
     const populatedRide = await Ride.findById(rideData._id).populate("customer", "firstName lastName phone");
@@ -499,19 +1009,42 @@ export const broadcastNewRideRequest = async (io, rideData) => {
     console.log(`💰 Fare: ${populatedRide.fare}, Vehicle: ${populatedRide.vehicle}`);
     console.log(`📱 Customer: ${populatedRide.customer?.firstName} ${populatedRide.customer?.lastName}`);
     
-    // Broadcast to all riders in the "onDuty" room
-    io.to("onDuty").emit("newRideRequest", populatedRide);
+    // Check if ride has blacklisted riders
+    const blacklistedRiderIds = populatedRide.blacklistedRiders || [];
+    console.log(`🚫 Blacklisted riders for this ride: ${blacklistedRiderIds.length > 0 ? blacklistedRiderIds.join(', ') : 'None'}`);
     
-    // Also update the full list of searching rides for all riders
-    const allSearchingRides = await Ride.find({ 
-      status: "SEARCHING_FOR_RIDER" 
-    }).populate("customer", "firstName lastName phone");
+    // Send to each on-duty rider individually, excluding blacklisted ones
+    let sentCount = 0;
+    for (const [riderId, riderData] of onDutyRiders.entries()) {
+      // Skip if rider is blacklisted for this ride
+      if (blacklistedRiderIds.some(id => id.toString() === riderId)) {
+        console.log(`⏭️ Skipping rider ${riderId} - blacklisted for this ride`);
+        continue;
+      }
+      
+      // Send to this specific rider
+      const riderSocket = io.sockets.sockets.get(riderData.socketId);
+      if (riderSocket) {
+        riderSocket.emit("newRideRequest", populatedRide);
+        sentCount++;
+      }
+    }
     
-    console.log(`📋 Broadcasting updated list of ${allSearchingRides.length} searching rides`);
-    io.to("onDuty").emit("allSearchingRides", allSearchingRides);
+    console.log(`💬 Broadcasted ride ${rideData._id} (${populatedRide.vehicle}) to ${sentCount}/${onDutyRiders.size} on-duty riders (${blacklistedRiderIds.length} blacklisted)`);
     
-    // Log the number of riders who received the broadcast
-    console.log(`💬 Broadcasted ride ${rideData._id} to ${onDutyRiders.size} on-duty riders`);
+    // Send updated list of ALL searching rides to each rider (filtered by their blacklist)
+    for (const [riderId, riderData] of onDutyRiders.entries()) {
+      const riderSocket = io.sockets.sockets.get(riderData.socketId);
+      if (riderSocket) {
+        // Get rides excluding those where this rider is blacklisted
+        const ridesForRider = await Ride.find({ 
+          status: "SEARCHING_FOR_RIDER",
+          blacklistedRiders: { $ne: riderId }
+        }).populate("customer", "firstName lastName phone");
+        
+        riderSocket.emit("allSearchingRides", ridesForRider);
+      }
+    }
     
     // Log all on-duty rider IDs
     if (onDutyRiders.size > 0) {

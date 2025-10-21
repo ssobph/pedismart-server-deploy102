@@ -8,6 +8,12 @@ import jwt from 'jsonwebtoken';
 
 const router = express.Router();
 
+// Debug route to test if auth routes are working
+router.get('/test', (req, res) => {
+  console.log('✅ Auth routes are working!');
+  res.json({ message: 'Auth routes are working!' });
+});
+
 router.get('/', testAuth);
 router.post('/refresh-token', refreshToken);
 router.post('/signin', auth); // Legacy endpoint

@@ -25,7 +25,9 @@ import authRouter from './routes/auth.js';
 import rideRouter from './routes/ride.js';
 import ratingRouter from './routes/rating.js';
 import adminRouter from './routes/admin.js';
+import adminManagementRouter from './routes/adminManagement.js';
 import analyticsRouter from './routes/analytics.js';
+import chatRouter from './routes/chat.js';
 
 // Import socket handler
 import handleSocketConnection from './controllers/sockets.js';
@@ -135,7 +137,19 @@ app.get('/debug/rides', async (req, res) => {
 
 const server = http.createServer(app);
 
-const io = new socketIo(server, { cors: { origin: "*" } });
+// Enhanced Socket.IO configuration for better reliability on Render
+const io = new socketIo(server, { 
+  cors: { origin: "*" },
+  // Increase timeouts to handle Render's free tier spin-down
+  pingTimeout: 60000, // 60 seconds (default is 20 seconds)
+  pingInterval: 25000, // 25 seconds (default is 25 seconds)
+  // Enable reconnection
+  transports: ['websocket', 'polling'],
+  // Increase max HTTP buffer size for large payloads
+  maxHttpBufferSize: 1e8, // 100 MB
+  // Allow more time for connections
+  connectTimeout: 45000, // 45 seconds
+});
 
 // Attach the WebSocket instance to the request object
 app.use((req, res, next) => {
@@ -151,7 +165,9 @@ app.use("/api/auth", authRouter);
 app.use("/api/v1/ride", authMiddleware, rideRouter); // Add /api/v1 prefix for consistency
 app.use("/ride", authMiddleware, rideRouter);        // Keep old route for backward compatibility
 app.use("/rating", authMiddleware, ratingRouter);
+app.use("/chat", authMiddleware, chatRouter);
 app.use("/admin", adminRouter);
+app.use("/api/admin-management", adminManagementRouter);
 app.use("/api/analytics", analyticsRouter);
 
 // Middleware

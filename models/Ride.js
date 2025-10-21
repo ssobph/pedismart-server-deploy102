@@ -55,6 +55,12 @@ const rideSchema = new Schema(
       type: Date,
       default: null,
     },
+    blacklistedRiders: {
+      type: [Schema.Types.ObjectId],
+      ref: "User",
+      default: [],
+      // Array of rider IDs who have cancelled this ride - they won't see it again
+    },
   },
   {
     timestamps: true,
