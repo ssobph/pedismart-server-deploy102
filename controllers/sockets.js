@@ -5,8 +5,54 @@ import Ride from "../models/Ride.js";
 import Rating from "../models/Rating.js";
 import Chat from "../models/Chat.js";
 import Message from "../models/Message.js";
+import { calculateDistance, MAX_DISTANCE_KM } from "../utils/mapUtils.js";
 
 const onDutyRiders = new Map();
+
+// ============================================
+// Helper function to filter rides by distance
+// ============================================
+const filterRidesByDistance = (rides, riderCoords) => {
+  // If MAX_DISTANCE_KM is null or undefined, return all rides (feature disabled)
+  if (!MAX_DISTANCE_KM) {
+    console.log(`📏 Distance filtering DISABLED - showing all ${rides.length} rides`);
+    return rides;
+  }
+
+  // If rider coordinates are not available, return all rides
+  if (!riderCoords || !riderCoords.latitude || !riderCoords.longitude) {
+    console.log(`⚠️ Rider coordinates not available - showing all ${rides.length} rides`);
+    return rides;
+  }
+
+  const filteredRides = rides.filter(ride => {
+    // Check if ride has valid pickup coordinates
+    if (!ride.pickup || !ride.pickup.latitude || !ride.pickup.longitude) {
+      console.log(`⚠️ Ride ${ride._id} has invalid pickup coordinates`);
+      return false;
+    }
+
+    // Calculate distance between rider and passenger pickup location
+    const distance = calculateDistance(
+      riderCoords.latitude,
+      riderCoords.longitude,
+      ride.pickup.latitude,
+      ride.pickup.longitude
+    );
+
+    const withinRange = distance <= MAX_DISTANCE_KM;
+    
+    if (!withinRange) {
+      console.log(`📏 Ride ${ride._id} filtered out: ${distance.toFixed(2)}km away (max: ${MAX_DISTANCE_KM}km)`);
+    }
+
+    return withinRange;
+  });
+
+  console.log(`📏 Distance filtering: ${filteredRides.length}/${rides.length} rides within ${MAX_DISTANCE_KM}km`);
+  return filteredRides;
+};
+// ============================================
 
 const handleSocketConnection = (io) => {
   io.use(async (socket, next) => {
@@ -79,26 +125,32 @@ const handleSocketConnection = (io) => {
             blacklistedRiders: { $ne: user.id } // Exclude rides where rider is blacklisted
           }).populate("customer", "firstName lastName phone");
           
-          console.log(`📤 Sending ${searchingRides.length} searching rides (ALL vehicle types) to newly on-duty rider ${user.id} (vehicle: ${riderVehicleType})`);
+          // ============================================
+          // Apply MAX_DISTANCE filter if enabled
+          // ============================================
+          const filteredRides = filterRidesByDistance(searchingRides, coords);
+          // ============================================
+          
+          console.log(`📤 Sending ${filteredRides.length} searching rides (ALL vehicle types) to newly on-duty rider ${user.id} (vehicle: ${riderVehicleType})`);
           
           // Force a small delay to ensure socket is ready (helps with race conditions)
           setTimeout(() => {
             // Send all rides at once
-            socket.emit("allSearchingRides", searchingRides);
+            socket.emit("allSearchingRides", filteredRides);
             
             // Also send individual ride notifications to ensure they're received
-            if (searchingRides.length > 0) {
-              console.log(`📝 Sending individual ride notifications for ${searchingRides.length} rides`);
-              searchingRides.forEach(ride => {
+            if (filteredRides.length > 0) {
+              console.log(`📝 Sending individual ride notifications for ${filteredRides.length} rides`);
+              filteredRides.forEach(ride => {
                 socket.emit("newRideRequest", ride);
               });
               
               // Log the ride IDs and vehicle types
-              const rideIds = searchingRides.map(r => r._id.toString());
+              const rideIds = filteredRides.map(r => r._id.toString());
               console.log(`📝 Ride IDs: ${rideIds.join(', ')}`);
               
               // Log vehicle type breakdown
-              const vehicleBreakdown = searchingRides.reduce((acc, ride) => {
+              const vehicleBreakdown = filteredRides.reduce((acc, ride) => {
                 acc[ride.vehicle] = (acc[ride.vehicle] || 0) + 1;
                 return acc;
               }, {});
@@ -108,7 +160,7 @@ const handleSocketConnection = (io) => {
             }
             
             // Confirm successful send
-            console.log(`✅ Successfully sent ${searchingRides.length} rides to newly on-duty rider ${user.id}`);
+            console.log(`✅ Successfully sent ${filteredRides.length} rides to newly on-duty rider ${user.id}`);
           }, 500); // Small delay to ensure socket is ready
         } catch (error) {
           console.error("❌ Error sending rides to newly on-duty rider:", error);
@@ -157,30 +209,38 @@ const handleSocketConnection = (io) => {
           
           console.log(`📋 Found ${searchingRides.length} searching rides (ALL vehicle types) for rider ${user.id}`);
           
+          // ============================================
+          // Apply MAX_DISTANCE filter if enabled
+          // ============================================
+          const riderData = onDutyRiders.get(user.id);
+          const riderCoords = riderData?.coords;
+          const filteredRides = filterRidesByDistance(searchingRides, riderCoords);
+          // ============================================
+          
           // Send all rides to the rider
-          console.log(`📤 Emitting ${searchingRides.length} rides to rider ${user.id}`);
+          console.log(`📤 Emitting ${filteredRides.length} rides to rider ${user.id}`);
           
           // Force a small delay to ensure socket is ready (helps with race conditions)
           setTimeout(() => {
-            socket.emit("allSearchingRides", searchingRides);
+            socket.emit("allSearchingRides", filteredRides);
             
             // Log success message
-            console.log(`✅ Successfully sent ${searchingRides.length} rides to rider ${user.id}`);
+            console.log(`✅ Successfully sent ${filteredRides.length} rides to rider ${user.id}`);
             
             // Log the ride IDs for debugging
-            if (searchingRides.length > 0) {
-              const rideIds = searchingRides.map(r => r._id.toString());
+            if (filteredRides.length > 0) {
+              const rideIds = filteredRides.map(r => r._id.toString());
               console.log(`📝 Ride IDs: ${rideIds.join(', ')}`);
               
               // Log vehicle type breakdown
-              const vehicleBreakdown = searchingRides.reduce((acc, ride) => {
+              const vehicleBreakdown = filteredRides.reduce((acc, ride) => {
                 acc[ride.vehicle] = (acc[ride.vehicle] || 0) + 1;
                 return acc;
               }, {});
               console.log(`🚗 Vehicle types: ${JSON.stringify(vehicleBreakdown)}`);
               
               // Log more details about each ride
-              searchingRides.forEach(ride => {
+              filteredRides.forEach(ride => {
                 console.log(`📍 Ride ${ride._id}: ${ride.pickup?.address} to ${ride.drop?.address}, Vehicle: ${ride.vehicle}, Fare: ${ride.fare}`);
               });
             } else {
@@ -1015,12 +1075,32 @@ export const broadcastNewRideRequest = async (io, rideData) => {
     
     // Send to each on-duty rider individually, excluding blacklisted ones
     let sentCount = 0;
+    let distanceFilteredCount = 0;
     for (const [riderId, riderData] of onDutyRiders.entries()) {
       // Skip if rider is blacklisted for this ride
       if (blacklistedRiderIds.some(id => id.toString() === riderId)) {
         console.log(`⏭️ Skipping rider ${riderId} - blacklisted for this ride`);
         continue;
       }
+      
+      // ============================================
+      // Apply MAX_DISTANCE filter if enabled
+      // ============================================
+      if (MAX_DISTANCE_KM && riderData.coords && populatedRide.pickup) {
+        const distance = calculateDistance(
+          riderData.coords.latitude,
+          riderData.coords.longitude,
+          populatedRide.pickup.latitude,
+          populatedRide.pickup.longitude
+        );
+        
+        if (distance > MAX_DISTANCE_KM) {
+          console.log(`📏 Skipping rider ${riderId} - ${distance.toFixed(2)}km away (max: ${MAX_DISTANCE_KM}km)`);
+          distanceFilteredCount++;
+          continue;
+        }
+      }
+      // ============================================
       
       // Send to this specific rider
       const riderSocket = io.sockets.sockets.get(riderData.socketId);
@@ -1030,9 +1110,9 @@ export const broadcastNewRideRequest = async (io, rideData) => {
       }
     }
     
-    console.log(`💬 Broadcasted ride ${rideData._id} (${populatedRide.vehicle}) to ${sentCount}/${onDutyRiders.size} on-duty riders (${blacklistedRiderIds.length} blacklisted)`);
+    console.log(`💬 Broadcasted ride ${rideData._id} (${populatedRide.vehicle}) to ${sentCount}/${onDutyRiders.size} on-duty riders (${blacklistedRiderIds.length} blacklisted, ${distanceFilteredCount} too far)`);
     
-    // Send updated list of ALL searching rides to each rider (filtered by their blacklist)
+    // Send updated list of ALL searching rides to each rider (filtered by their blacklist and distance)
     for (const [riderId, riderData] of onDutyRiders.entries()) {
       const riderSocket = io.sockets.sockets.get(riderData.socketId);
       if (riderSocket) {
@@ -1042,7 +1122,13 @@ export const broadcastNewRideRequest = async (io, rideData) => {
           blacklistedRiders: { $ne: riderId }
         }).populate("customer", "firstName lastName phone");
         
-        riderSocket.emit("allSearchingRides", ridesForRider);
+        // ============================================
+        // Apply MAX_DISTANCE filter if enabled
+        // ============================================
+        const filteredRidesForRider = filterRidesByDistance(ridesForRider, riderData.coords);
+        // ============================================
+        
+        riderSocket.emit("allSearchingRides", filteredRidesForRider);
       }
     }
     

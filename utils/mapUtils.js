@@ -1,3 +1,12 @@
+// ============================================
+// MAX DISTANCE FEATURE (Easy to enable/disable)
+// ============================================
+// Set to 30 to enable 30KM max distance filtering
+// Riders beyond this distance from passenger pickup won't see the ride
+// Set to null to disable: export const MAX_DISTANCE_KM = null;
+export const MAX_DISTANCE_KM = 30;
+// ============================================
+
 export const calculateDistance = (lat1, lon1, lat2, lon2) => {
   const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);

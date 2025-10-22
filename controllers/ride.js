@@ -6,6 +6,7 @@ import {
   calculateDistance,
   // calculateFare,
   generateOTP,
+  MAX_DISTANCE_KM,
 } from "../utils/mapUtils.js";
 import { broadcastNewRideRequest, broadcastRideAccepted } from "./sockets.js";
 
@@ -44,6 +45,27 @@ export const acceptRide = async (req, res) => {
     }
 
     console.log(`✅ Vehicle type match: Rider ${riderId} with ${rider.vehicleType} accepting ${ride.vehicle} ride`);
+
+    // ============================================
+    // Check MAX_DISTANCE if enabled (optional validation)
+    // Note: This is a server-side safety check. The main filtering happens in socket broadcasts.
+    // ============================================
+    if (MAX_DISTANCE_KM && rider.location && ride.pickup) {
+      const distance = calculateDistance(
+        rider.location.latitude,
+        rider.location.longitude,
+        ride.pickup.latitude,
+        ride.pickup.longitude
+      );
+      
+      if (distance > MAX_DISTANCE_KM) {
+        console.log(`❌ Distance check failed: Rider is ${distance.toFixed(2)}km away (max: ${MAX_DISTANCE_KM}km)`);
+        throw new BadRequestError(`This ride is too far away (${distance.toFixed(1)}km). Maximum distance is ${MAX_DISTANCE_KM}km.`);
+      }
+      
+      console.log(`✅ Distance check passed: Rider is ${distance.toFixed(2)}km away (within ${MAX_DISTANCE_KM}km limit)`);
+    }
+    // ============================================
 
     ride.rider = riderId;
     ride.status = "START";
