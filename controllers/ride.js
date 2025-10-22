@@ -1,9 +1,10 @@
 import Ride from "../models/Ride.js";
 import { BadRequestError, NotFoundError } from "../errors/index.js";
 import { StatusCodes } from "http-status-codes";
+// COMMENTED OUT: Payment/Fare - Driver handles pricing manually
 import {
   calculateDistance,
-  calculateFare,
+  // calculateFare,
   generateOTP,
 } from "../utils/mapUtils.js";
 import { broadcastNewRideRequest, broadcastRideAccepted } from "./sockets.js";
@@ -433,10 +434,12 @@ export const createRide = async (req, res) => {
     
     console.log(`🛣️ Distance calculated: ${distance.toFixed(2)} km`);
     
+    // COMMENTED OUT: Payment/Fare - Driver handles pricing manually
     // Calculate fare based on vehicle type and distance
-    const fareOptions = calculateFare(distance);
-    const fare = fareOptions[vehicle];
-    console.log(`💰 Fare calculated: ${fare} for ${vehicle}`);
+    // const fareOptions = calculateFare(distance);
+    // const fare = fareOptions[vehicle];
+    // console.log(`💰 Fare calculated: ${fare} for ${vehicle}`);
+    const fare = 0; // Fare will be determined by driver
 
     // Generate OTP
     const otp = generateOTP(); // Fixed: Use correct function name

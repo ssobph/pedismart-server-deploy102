@@ -12,33 +12,34 @@ export const calculateDistance = (lat1, lon1, lat2, lon2) => {
   return R * c;
 };
 
-export const calculateFare = (distance) => {
-  const rateStructure = {
-    "Single Motorcycle": { minimumRate: 15, perKmRate: 2.5 },
-    "Tricycle": { minimumRate: 20, perKmRate: 2.8 },
-    "Cab": { minimumRate: 30, perKmRate: 3 },
-  };
-
-  const fareCalculation = (minimumRate, perKmRate) => {
-    const calculatedFare = distance * perKmRate;
-    return Math.max(calculatedFare, minimumRate);
-  };
-
-  return {
-    "Single Motorcycle": fareCalculation(
-      rateStructure["Single Motorcycle"].minimumRate,
-      rateStructure["Single Motorcycle"].perKmRate
-    ),
-    "Tricycle": fareCalculation(
-      rateStructure["Tricycle"].minimumRate,
-      rateStructure["Tricycle"].perKmRate
-    ),
-    "Cab": fareCalculation(
-      rateStructure["Cab"].minimumRate,
-      rateStructure["Cab"].perKmRate
-    ),
-  };
-};
+// COMMENTED OUT: Payment/Fare - Driver handles pricing manually
+// export const calculateFare = (distance) => {
+//   const rateStructure = {
+//     // "Single Motorcycle": { minimumRate: 15, perKmRate: 2.5 }, // Commented out: Only using Tricycle
+//     "Tricycle": { minimumRate: 20, perKmRate: 2.8 },
+//     // "Cab": { minimumRate: 30, perKmRate: 3 }, // Commented out: Only using Tricycle
+//   };
+//
+//   const fareCalculation = (minimumRate, perKmRate) => {
+//     const calculatedFare = distance * perKmRate;
+//     return Math.max(calculatedFare, minimumRate);
+//   };
+//
+//   return {
+//     // "Single Motorcycle": fareCalculation(
+//     //   rateStructure["Single Motorcycle"].minimumRate,
+//     //   rateStructure["Single Motorcycle"].perKmRate
+//     // ), // Commented out: Only using Tricycle
+//     "Tricycle": fareCalculation(
+//       rateStructure["Tricycle"].minimumRate,
+//       rateStructure["Tricycle"].perKmRate
+//     ),
+//     // "Cab": fareCalculation(
+//     //   rateStructure["Cab"].minimumRate,
+//     //   rateStructure["Cab"].perKmRate
+//     // ), // Commented out: Only using Tricycle
+//   };
+// };
 
 export const generateOTP = () => {
   return Math.floor(1000 + Math.random() * 9000).toString();

@@ -471,11 +471,12 @@ export const updateUserProfile = async (req, res) => {
     
     if (sex) user.sex = sex;
     
-    // Update vehicle type if provided and user is a rider
+    // Update vehicle type if provided and user is a rider (only Tricycle is active)
     if (vehicleType !== undefined && user.role === "rider") {
-      const validVehicleTypes = ["Single Motorcycle", "Tricycle", "Cab"];
+      // const validVehicleTypes = ["Single Motorcycle", "Tricycle", "Cab"]; // Commented out: Only using Tricycle
+      const validVehicleTypes = ["Tricycle"]; // Only Tricycle is active
       if (vehicleType && !validVehicleTypes.includes(vehicleType)) {
-        throw new BadRequestError("Invalid vehicle type. Must be Single Motorcycle, Tricycle, or Cab");
+        throw new BadRequestError("Invalid vehicle type. Must be Tricycle"); // Updated error message
       }
       user.vehicleType = vehicleType;
       console.log(`✅ Updated vehicle type for rider ${user._id} to: ${vehicleType}`);

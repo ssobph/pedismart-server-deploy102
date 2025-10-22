@@ -1,3 +1,8 @@
+// COMMENTED OUT: Payment/Fare - Driver handles pricing manually
+// Note: All fare and revenue calculations in this file will return 0 or minimal values
+// since fare is set to 0 in ride creation. Analytics data is kept for structure but
+// revenue/fare metrics are not meaningful until pricing is re-enabled.
+
 import User from '../models/User.js';
 import Ride from '../models/Ride.js';
 import Rating from '../models/Rating.js';
@@ -164,11 +169,11 @@ export const getRideStats = async (req, res) => {
       }
     ]);
 
-    // Format vehicle stats
+    // Format vehicle stats (only Tricycle is active)
     const formattedVehicleStats = {
-      "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 },
+      // "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 }, // Commented out: Only using Tricycle
       "Tricycle": { count: 0, totalFare: 0, totalDistance: 0 },
-      "Cab": { count: 0, totalFare: 0, totalDistance: 0 }
+      // "Cab": { count: 0, totalFare: 0, totalDistance: 0 } // Commented out: Only using Tricycle
     };
 
     vehicleStats.forEach(stat => {
@@ -346,17 +351,17 @@ export const getCombinedAnalytics = async (req, res) => {
       }
     });
 
-    // Format vehicle stats
+    // Format vehicle stats (only Tricycle is active)
     const formattedVehicleStats = {
       riders: {
-        'Single Motorcycle': 0,
+        // 'Single Motorcycle': 0, // Commented out: Only using Tricycle
         'Tricycle': 0,
-        'Cab': 0
+        // 'Cab': 0 // Commented out: Only using Tricycle
       },
       rides: {
-        "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 },
+        // "Single Motorcycle": { count: 0, totalFare: 0, totalDistance: 0 }, // Commented out: Only using Tricycle
         "Tricycle": { count: 0, totalFare: 0, totalDistance: 0 },
-        "Cab": { count: 0, totalFare: 0, totalDistance: 0 }
+        // "Cab": { count: 0, totalFare: 0, totalDistance: 0 } // Commented out: Only using Tricycle
       }
     };
 

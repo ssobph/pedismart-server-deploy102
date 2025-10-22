@@ -141,10 +141,10 @@ const handleSocketConnection = (io) => {
         try {
           console.log(`🔍 Rider ${user.id} requesting all searching rides`);
           
-          // Get rider's vehicle type from database
+          // Get rider's vehicle type from database (only Tricycle is active)
           const User = (await import('../models/User.js')).default;
           const riderUser = await User.findById(user.id).select('vehicleType');
-          const vehicleType = riderUser?.vehicleType || "Single Motorcycle";
+          const vehicleType = riderUser?.vehicleType || "Tricycle"; // Default to Tricycle instead of Single Motorcycle
           console.log(`🚗 Rider ${user.id} vehicle type: ${vehicleType}`);
           
           // Find ALL rides with SEARCHING_FOR_RIDER status (NO vehicle filter - client will handle visual feedback)
