@@ -68,7 +68,7 @@ const userSchema = new Schema(
     // Role-based verification fields
     userRole: {
       type: String,
-      enum: ["Student", "Faculty", "Staff"],
+      enum: ["Student"],
       required: false,
     },
     // Document verification URLs
@@ -77,10 +77,6 @@ const userSchema = new Schema(
       required: false,
     },
     schoolIdDocument: {
-      type: String,
-      required: false,
-    },
-    staffFacultyIdDocument: {
       type: String,
       required: false,
     },

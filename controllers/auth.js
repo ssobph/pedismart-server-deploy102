@@ -118,7 +118,6 @@ export const register = async (req, res) => {
     userRole,
     photo,
     schoolIdDocument,
-    staffFacultyIdDocument,
     cor,
     driverLicense,
     vehicleType
@@ -171,13 +170,6 @@ export const register = async (req, res) => {
         if (role === "rider" && !driverLicense) {
           throw new BadRequestError("Driver license is required for student drivers");
         }
-      } else if (userRole === "Faculty" || userRole === "Staff") {
-        if (!staffFacultyIdDocument) {
-          throw new BadRequestError("Staff/Faculty ID is required for faculty and staff");
-        }
-        if (role === "rider" && !driverLicense) {
-          throw new BadRequestError("Driver license is required for faculty/staff drivers");
-        }
       }
     }
 
@@ -196,7 +188,6 @@ export const register = async (req, res) => {
       userRole,
       photo,
       schoolIdDocument,
-      staffFacultyIdDocument,
       cor,
       driverLicense,
       vehicleType,
@@ -710,11 +701,6 @@ export const uploadDocuments = async (req, res) => {
     
     if (userRole === 'Student') {
       requiredDocs.push('schoolIdDocument', 'cor');
-      if (role === 'rider') {
-        requiredDocs.push('driverLicense');
-      }
-    } else if (userRole === 'Faculty' || userRole === 'Staff') {
-      requiredDocs.push('staffFacultyIdDocument');
       if (role === 'rider') {
         requiredDocs.push('driverLicense');
       }

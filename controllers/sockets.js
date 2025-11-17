@@ -958,6 +958,344 @@ const handleSocketConnection = (io) => {
 
     // ============ END CHAT SOCKET EVENTS ============
 
+    // ============ MULTI-PASSENGER SOCKET EVENTS ============
+    
+    // Approve passenger join request (rider only)
+    socket.on("approveJoinRequest", async (data) => {
+      try {
+        const { rideId, passengerId } = data;
+        const riderId = user.id;
+
+        console.log(`✅ Socket: Rider ${riderId} approving passenger ${passengerId} for ride ${rideId}`);
+
+        // Verify user is a rider
+        if (user.role !== "rider") {
+          socket.emit("joinRequestError", { message: "Only riders can approve join requests" });
+          return;
+        }
+
+        // Find the ride
+        const ride = await Ride.findById(rideId).populate("customer rider passengers.userId");
+        
+        if (!ride) {
+          socket.emit("joinRequestError", { message: "Ride not found" });
+          return;
+        }
+
+        // Verify the rider owns this ride
+        if (ride.rider._id.toString() !== riderId) {
+          socket.emit("joinRequestError", { message: "You are not the rider for this ride" });
+          return;
+        }
+
+        // Check if ride is full
+        if (ride.currentPassengerCount >= ride.maxPassengers) {
+          socket.emit("joinRequestError", { message: "Ride is full" });
+          return;
+        }
+
+        // Check if passenger is already in the ride
+        const alreadyInRide = ride.passengers.some(p => p.userId._id.toString() === passengerId);
+        if (alreadyInRide) {
+          socket.emit("joinRequestError", { message: "Passenger is already in this ride" });
+          return;
+        }
+
+        // Fetch passenger details
+        const passengerUser = await User.findById(passengerId).select("firstName lastName phone");
+        if (!passengerUser) {
+          socket.emit("joinRequestError", { message: "Passenger user not found" });
+          return;
+        }
+
+        // Add passenger to the ride with all required fields
+        ride.passengers.push({
+          userId: passengerId,
+          firstName: passengerUser.firstName,
+          lastName: passengerUser.lastName,
+          phone: passengerUser.phone,
+          status: "WAITING",
+          joinedAt: new Date()
+        });
+        ride.currentPassengerCount = ride.passengers.length;
+        await ride.save();
+
+        // Populate the updated ride
+        const updatedRide = await Ride.findById(rideId)
+          .populate("customer rider passengers.userId");
+
+        console.log(`✅ Socket: Passenger ${passengerId} approved and added to ride ${rideId}`);
+
+        // Notify the passenger that they were approved
+        io.to(`user_${passengerId}`).emit("joinRequestApproved", {
+          rideId: rideId,
+          ride: updatedRide,
+          message: "Your request to join the ride has been approved!"
+        });
+
+        // Notify the rider
+        socket.emit("joinRequestApproveSuccess", {
+          rideId: rideId,
+          passengerId: passengerId,
+          ride: updatedRide,
+          message: "Passenger approved successfully"
+        });
+
+        // Broadcast passenger update to all users in the ride room
+        io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+
+        // Notify all passengers in the ride about the new passenger
+        io.to(`ride_${rideId}`).emit("newPassengerJoined", {
+          passenger: passengerUser,
+          ride: updatedRide
+        });
+
+      } catch (error) {
+        console.error(`❌ Socket: Error approving join request:`, error);
+        socket.emit("joinRequestError", { message: "Failed to approve join request", error: error.message });
+      }
+    });
+
+    // Decline passenger join request (rider only)
+    socket.on("declineJoinRequest", async (data) => {
+      try {
+        const { rideId, passengerId } = data;
+        const riderId = user.id;
+
+        console.log(`❌ Socket: Rider ${riderId} declining passenger ${passengerId} for ride ${rideId}`);
+
+        // Verify user is a rider
+        if (user.role !== "rider") {
+          socket.emit("joinRequestError", { message: "Only riders can decline join requests" });
+          return;
+        }
+
+        // Find the ride
+        const ride = await Ride.findById(rideId).populate("customer rider");
+        
+        if (!ride) {
+          socket.emit("joinRequestError", { message: "Ride not found" });
+          return;
+        }
+
+        // Verify the rider owns this ride
+        if (ride.rider._id.toString() !== riderId) {
+          socket.emit("joinRequestError", { message: "You are not the rider for this ride" });
+          return;
+        }
+
+        console.log(`✅ Socket: Join request declined for passenger ${passengerId}`);
+
+        // Notify the passenger that their request was declined
+        io.to(`user_${passengerId}`).emit("joinRequestDeclined", {
+          rideId: rideId,
+          message: "Your request to join the ride has been declined"
+        });
+
+        // Notify the rider
+        socket.emit("joinRequestDeclineSuccess", {
+          rideId: rideId,
+          passengerId: passengerId,
+          message: "Join request declined"
+        });
+
+      } catch (error) {
+        console.error(`❌ Socket: Error declining join request:`, error);
+        socket.emit("joinRequestError", { message: "Failed to decline join request", error: error.message });
+      }
+    });
+
+    // Update passenger status (rider only)
+    socket.on("updatePassengerStatus", async (data) => {
+      try {
+        const { rideId, passengerId, status } = data;
+        const riderId = user.id;
+
+        console.log(`🔄 Socket: Rider ${riderId} updating passenger ${passengerId} status to ${status} for ride ${rideId}`);
+
+        // Verify user is a rider
+        if (user.role !== "rider") {
+          socket.emit("passengerStatusError", { message: "Only riders can update passenger status" });
+          return;
+        }
+
+        // Find the ride
+        const ride = await Ride.findById(rideId).populate("customer rider passengers.userId");
+        
+        if (!ride) {
+          socket.emit("passengerStatusError", { message: "Ride not found" });
+          return;
+        }
+
+        // Verify the rider owns this ride
+        if (ride.rider._id.toString() !== riderId) {
+          socket.emit("passengerStatusError", { message: "You are not the rider for this ride" });
+          return;
+        }
+
+        // Find and update the passenger
+        const passenger = ride.passengers.find(p => p.userId._id.toString() === passengerId);
+        if (!passenger) {
+          socket.emit("passengerStatusError", { message: "Passenger not found in this ride" });
+          return;
+        }
+
+        passenger.status = status;
+        if (status === "ONBOARD" && !passenger.boardedAt) {
+          passenger.boardedAt = new Date();
+        }
+        await ride.save();
+
+        // Populate the updated ride
+        const updatedRide = await Ride.findById(rideId)
+          .populate("customer rider passengers.userId");
+
+        console.log(`✅ Socket: Passenger ${passengerId} status updated to ${status}`);
+
+        // Notify the rider
+        socket.emit("passengerStatusUpdateSuccess", {
+          rideId: rideId,
+          passengerId: passengerId,
+          status: status,
+          ride: updatedRide
+        });
+
+        // Broadcast passenger update to all users in the ride room
+        io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+
+        // Notify the specific passenger about their status change
+        const passengerSocket = [...io.sockets.sockets.values()].find(
+          s => s.user?.id === passengerId
+        );
+        if (passengerSocket) {
+          passengerSocket.emit("yourStatusUpdated", {
+            status: status,
+            ride: updatedRide
+          });
+          console.log(`👤 Socket: Notified passenger ${passengerId} of status change to ${status}`);
+        }
+
+      } catch (error) {
+        console.error(`❌ Socket: Error updating passenger status:`, error);
+        socket.emit("passengerStatusError", { message: "Failed to update passenger status", error: error.message });
+      }
+    });
+
+    // Remove passenger from ride (rider only)
+    socket.on("removePassenger", async (data) => {
+      try {
+        const { rideId, passengerId } = data;
+        const riderId = user.id;
+
+        console.log(`🗑️ Socket: Rider ${riderId} removing passenger ${passengerId} from ride ${rideId}`);
+
+        // Verify user is a rider
+        if (user.role !== "rider") {
+          socket.emit("removePassengerError", { message: "Only riders can remove passengers" });
+          return;
+        }
+
+        // Find the ride
+        const ride = await Ride.findById(rideId).populate("customer rider passengers.userId");
+        
+        if (!ride) {
+          socket.emit("removePassengerError", { message: "Ride not found" });
+          return;
+        }
+
+        // Verify the rider owns this ride
+        if (ride.rider._id.toString() !== riderId) {
+          socket.emit("removePassengerError", { message: "You are not the rider for this ride" });
+          return;
+        }
+
+        // Remove the passenger
+        ride.passengers = ride.passengers.filter(p => p.userId._id.toString() !== passengerId);
+        ride.currentPassengerCount = ride.passengers.length;
+        await ride.save();
+
+        // Populate the updated ride
+        const updatedRide = await Ride.findById(rideId)
+          .populate("customer rider passengers.userId");
+
+        console.log(`✅ Socket: Passenger ${passengerId} removed from ride`);
+
+        // Notify the passenger they were removed
+        io.to(`user_${passengerId}`).emit("removedFromRide", {
+          rideId: rideId,
+          message: "You have been removed from the ride"
+        });
+
+        // Notify the rider
+        socket.emit("removePassengerSuccess", {
+          rideId: rideId,
+          passengerId: passengerId,
+          ride: updatedRide
+        });
+
+        // Broadcast passenger update to all users in the ride room
+        io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+
+      } catch (error) {
+        console.error(`❌ Socket: Error removing passenger:`, error);
+        socket.emit("removePassengerError", { message: "Failed to remove passenger", error: error.message });
+      }
+    });
+
+    // Toggle accepting new passengers (rider only)
+    socket.on("toggleAcceptingPassengers", async (data) => {
+      try {
+        const { rideId } = data;
+        const riderId = user.id;
+
+        console.log(`🔄 Socket: Rider ${riderId} toggling accepting passengers for ride ${rideId}`);
+
+        // Verify user is a rider
+        if (user.role !== "rider") {
+          socket.emit("toggleAcceptingError", { message: "Only riders can toggle accepting passengers" });
+          return;
+        }
+
+        // Find the ride
+        const ride = await Ride.findById(rideId).populate("customer rider passengers.userId");
+        
+        if (!ride) {
+          socket.emit("toggleAcceptingError", { message: "Ride not found" });
+          return;
+        }
+
+        // Verify the rider owns this ride
+        if (ride.rider._id.toString() !== riderId) {
+          socket.emit("toggleAcceptingError", { message: "You are not the rider for this ride" });
+          return;
+        }
+
+        // Toggle the accepting status
+        ride.acceptingNewPassengers = !ride.acceptingNewPassengers;
+        await ride.save();
+
+        console.log(`✅ Socket: Accepting passengers toggled to ${ride.acceptingNewPassengers}`);
+
+        // Notify the rider
+        socket.emit("toggleAcceptingSuccess", {
+          rideId: rideId,
+          acceptingNewPassengers: ride.acceptingNewPassengers,
+          message: ride.acceptingNewPassengers 
+            ? "Now accepting new passengers" 
+            : "No longer accepting new passengers"
+        });
+
+        // Broadcast update to all users in the ride room
+        io.to(`ride_${rideId}`).emit("passengerUpdate", ride);
+
+      } catch (error) {
+        console.error(`❌ Socket: Error toggling accepting passengers:`, error);
+        socket.emit("toggleAcceptingError", { message: "Failed to toggle accepting passengers", error: error.message });
+      }
+    });
+
+    // ============ END MULTI-PASSENGER SOCKET EVENTS ============
+
     socket.on("disconnect", () => {
       if (user.role === "rider") onDutyRiders.delete(user.id);
       console.log(`${user.role} ${user.id} disconnected.`);

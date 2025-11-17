@@ -27,7 +27,6 @@ router.post('/reset-password', resetPassword); // Verify code and reset password
 router.post('/upload-documents', upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'schoolIdDocument', maxCount: 1 },
-  { name: 'staffFacultyIdDocument', maxCount: 1 },
   { name: 'cor', maxCount: 1 },
   { name: 'driverLicense', maxCount: 1 }
 ]), uploadDocuments); // Upload verification documents

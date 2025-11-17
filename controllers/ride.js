@@ -159,6 +159,42 @@ export const updateRideStatus = async (req, res) => {
     
     // Update the status
     ride.status = status;
+    
+    // ============================================
+    // AUTO-UPDATE PASSENGER STATUSES
+    // ============================================
+    if (ride.passengers && ride.passengers.length > 0) {
+      if (status === "ARRIVED") {
+        // When driver arrives, all WAITING passengers become ONBOARD
+        let updatedCount = 0;
+        ride.passengers.forEach(passenger => {
+          if (passenger.status === "WAITING") {
+            passenger.status = "ONBOARD";
+            if (!passenger.boardedAt) {
+              passenger.boardedAt = new Date();
+            }
+            updatedCount++;
+          }
+        });
+        if (updatedCount > 0) {
+          console.log(`👥 Auto-updated ${updatedCount} passengers to ONBOARD (ride ARRIVED)`);
+        }
+      } else if (status === "COMPLETED") {
+        // When ride completes, all ONBOARD passengers become DROPPED
+        let updatedCount = 0;
+        ride.passengers.forEach(passenger => {
+          if (passenger.status === "ONBOARD" || passenger.status === "WAITING") {
+            passenger.status = "DROPPED";
+            updatedCount++;
+          }
+        });
+        if (updatedCount > 0) {
+          console.log(`👥 Auto-updated ${updatedCount} passengers to DROPPED (ride COMPLETED)`);
+        }
+      }
+    }
+    // ============================================
+    
     await ride.save();
     
     // Log confirmation of successful update
@@ -168,6 +204,26 @@ export const updateRideStatus = async (req, res) => {
     if (req.io) {
       console.log(`Broadcasting ride status update: ${status} for ride ${rideId}`);
       req.io.to(`ride_${rideId}`).emit("rideUpdate", ride);
+      
+      // Broadcast passenger status updates if any passengers were auto-updated
+      if (ride.passengers && ride.passengers.length > 0 && (status === "ARRIVED" || status === "COMPLETED")) {
+        req.io.to(`ride_${rideId}`).emit("passengerUpdate", ride);
+        console.log(`👥 Broadcasting passenger status updates for ride ${rideId}`);
+        
+        // Notify each passenger individually about their status change
+        ride.passengers.forEach(passenger => {
+          const passengerSocket = [...req.io.sockets.sockets.values()].find(
+            socket => socket.user?.id === passenger.userId.toString()
+          );
+          if (passengerSocket) {
+            passengerSocket.emit("yourStatusUpdated", {
+              status: passenger.status,
+              ride: ride
+            });
+            console.log(`👤 Notified passenger ${passenger.firstName} of status: ${passenger.status}`);
+          }
+        });
+      }
       
       // Also directly notify the customer
       const customerSocket = [...req.io.sockets.sockets.values()].find(
@@ -376,7 +432,11 @@ export const getMyRides = async (req, res) => {
 
   try {
     const query = {
-      $or: [{ customer: userId }, { rider: userId }],
+      $or: [
+        { customer: userId }, 
+        { rider: userId },
+        { "passengers.userId": userId } // Include rides where user is a passenger
+      ],
     };
 
     if (status) {
@@ -386,6 +446,7 @@ export const getMyRides = async (req, res) => {
     const rides = await Ride.find(query)
       .populate("customer", "firstName lastName phone email")
       .populate("rider", "firstName lastName phone email vehicleType")
+      .populate("passengers.userId", "firstName lastName phone email") // Populate passenger details
       .sort({ createdAt: -1 });
 
     res.status(StatusCodes.OK).json({
@@ -437,6 +498,465 @@ export const getSearchingRides = async (req, res) => {
   }
 };
 
+// ============================================
+// MULTI-PASSENGER FEATURE - Passenger Management
+// ============================================
+
+// Join an existing ride as a passenger
+export const joinRide = async (req, res) => {
+  const { rideId } = req.params;
+  const userId = req.user.id;
+
+  if (!rideId) {
+    throw new BadRequestError("Ride ID is required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId).populate("customer", "firstName lastName phone");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Check if ride is accepting new passengers
+    if (!ride.acceptingNewPassengers) {
+      throw new BadRequestError("This ride is not accepting new passengers");
+    }
+
+    // Check if ride is full
+    if (ride.currentPassengerCount >= ride.maxPassengers) {
+      throw new BadRequestError("This ride is full (maximum 6 passengers)");
+    }
+
+    // Check if user is already in the ride
+    const alreadyJoined = ride.passengers.some(p => p.userId.toString() === userId);
+    if (alreadyJoined) {
+      throw new BadRequestError("You have already joined this ride");
+    }
+
+    // Check if ride is in valid status for joining
+    if (!["SEARCHING_FOR_RIDER", "START", "ARRIVED"].includes(ride.status)) {
+      throw new BadRequestError("Cannot join this ride at this stage");
+    }
+
+    // Get user info
+    const User = (await import('../models/User.js')).default;
+    const user = await User.findById(userId).select('firstName lastName phone email photo');
+
+    // Send join request to rider for approval
+    if (req.io && ride.rider) {
+      const riderSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === ride.rider.toString()
+      );
+      
+      if (riderSocket) {
+        console.log(`📨 Sending join request to rider for ride ${rideId}`);
+        
+        // Send join request to rider
+        riderSocket.emit("passengerJoinRequest", {
+          rideId: rideId,
+          requestId: `${userId}_${Date.now()}`,
+          passenger: {
+            userId: userId,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            phone: user.phone,
+            email: user.email || '',
+            photo: user.photo || null,
+          },
+          ride: {
+            pickup: ride.pickup,
+            drop: ride.drop,
+            currentPassengerCount: ride.currentPassengerCount,
+            maxPassengers: ride.maxPassengers,
+          }
+        });
+
+        res.status(StatusCodes.OK).json({
+          message: "Join request sent to rider. Waiting for approval...",
+          status: "PENDING",
+          rideId: rideId,
+        });
+      } else {
+        throw new BadRequestError("Rider is not online. Cannot send join request.");
+      }
+    } else {
+      throw new BadRequestError("Rider is not assigned to this ride yet");
+    }
+  } catch (error) {
+    console.error("Error joining ride:", error);
+    throw new BadRequestError(error.message || "Failed to join ride");
+  }
+};
+
+// Approve passenger join request (rider only)
+export const approvePassengerJoinRequest = async (req, res) => {
+  const { rideId } = req.params;
+  const { passengerId } = req.body;
+  const riderId = req.user.id;
+
+  if (!rideId || !passengerId) {
+    throw new BadRequestError("Ride ID and passenger ID are required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Verify that the requester is the assigned rider
+    if (!ride.rider || ride.rider._id.toString() !== riderId) {
+      throw new BadRequestError("Only the assigned rider can approve join requests");
+    }
+
+    // Check if ride is full
+    if (ride.currentPassengerCount >= ride.maxPassengers) {
+      throw new BadRequestError("This ride is full");
+    }
+
+    // Check if user is already in the ride
+    const alreadyJoined = ride.passengers.some(p => p.userId.toString() === passengerId);
+    if (alreadyJoined) {
+      throw new BadRequestError("Passenger has already joined this ride");
+    }
+
+    // Get passenger info
+    const User = (await import('../models/User.js')).default;
+    const user = await User.findById(passengerId).select('firstName lastName phone');
+
+    if (!user) {
+      throw new NotFoundError("Passenger not found");
+    }
+
+    // Add passenger to ride
+    ride.passengers.push({
+      userId: passengerId,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      phone: user.phone,
+      status: ride.status === "ARRIVED" ? "ONBOARD" : "WAITING",
+      isOriginalBooker: false,
+      joinedAt: new Date(),
+    });
+
+    ride.currentPassengerCount = ride.passengers.length;
+    await ride.save();
+
+    console.log(`✅ Rider approved: Passenger ${user.firstName} ${user.lastName} joined ride ${rideId}`);
+
+    // Broadcast passenger update
+    if (req.io) {
+      const updatedRide = await Ride.findById(rideId)
+        .populate("customer", "firstName lastName phone")
+        .populate("rider", "firstName lastName phone vehicleType");
+      
+      req.io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+      
+      // Notify the passenger that they were approved
+      const passengerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === passengerId
+      );
+      if (passengerSocket) {
+        passengerSocket.emit("joinRequestApproved", {
+          rideId: rideId,
+          ride: updatedRide,
+          message: "Your join request was approved!"
+        });
+      }
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: "Passenger join request approved",
+      ride,
+    });
+  } catch (error) {
+    console.error("Error approving join request:", error);
+    throw new BadRequestError(error.message || "Failed to approve join request");
+  }
+};
+
+// Decline passenger join request (rider only)
+export const declinePassengerJoinRequest = async (req, res) => {
+  const { rideId } = req.params;
+  const { passengerId } = req.body;
+  const riderId = req.user.id;
+
+  if (!rideId || !passengerId) {
+    throw new BadRequestError("Ride ID and passenger ID are required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId);
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Verify that the requester is the assigned rider
+    if (!ride.rider || ride.rider.toString() !== riderId) {
+      throw new BadRequestError("Only the assigned rider can decline join requests");
+    }
+
+    console.log(`❌ Rider declined: Passenger join request for ride ${rideId}`);
+
+    // Notify the passenger that they were declined
+    if (req.io) {
+      const passengerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === passengerId
+      );
+      if (passengerSocket) {
+        passengerSocket.emit("joinRequestDeclined", {
+          rideId: rideId,
+          message: "Your join request was declined by the rider"
+        });
+      }
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: "Passenger join request declined",
+    });
+  } catch (error) {
+    console.error("Error declining join request:", error);
+    throw new BadRequestError(error.message || "Failed to decline join request");
+  }
+};
+
+// Update passenger status (for rider to mark passengers as onboard/dropped)
+export const updatePassengerStatus = async (req, res) => {
+  const { rideId, passengerId } = req.params;
+  const { status } = req.body;
+  const riderId = req.user.id;
+
+  if (!rideId || !passengerId || !status) {
+    throw new BadRequestError("Ride ID, passenger ID, and status are required");
+  }
+
+  if (!["WAITING", "ONBOARD", "DROPPED"].includes(status)) {
+    throw new BadRequestError("Invalid passenger status");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Verify that the requester is the assigned rider
+    if (!ride.rider || ride.rider._id.toString() !== riderId) {
+      throw new BadRequestError("Only the assigned rider can update passenger status");
+    }
+
+    // Find and update passenger
+    const passenger = ride.passengers.find(p => p.userId.toString() === passengerId);
+    if (!passenger) {
+      throw new NotFoundError("Passenger not found in this ride");
+    }
+
+    passenger.status = status;
+    if (status === "ONBOARD" && !passenger.boardedAt) {
+      passenger.boardedAt = new Date();
+    }
+
+    await ride.save();
+
+    console.log(`👤 Passenger ${passenger.firstName} ${passenger.lastName} status updated to ${status} in ride ${rideId}`);
+
+    // Broadcast passenger update to all connected clients
+    if (req.io) {
+      const updatedRide = await Ride.findById(rideId)
+        .populate("customer", "firstName lastName phone")
+        .populate("rider", "firstName lastName phone vehicleType");
+      
+      req.io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+      
+      // Notify the specific passenger
+      const passengerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === passengerId
+      );
+      if (passengerSocket) {
+        passengerSocket.emit("yourStatusUpdated", {
+          status,
+          ride: updatedRide
+        });
+      }
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: `Passenger status updated to ${status}`,
+      ride,
+    });
+  } catch (error) {
+    console.error("Error updating passenger status:", error);
+    throw new BadRequestError(error.message || "Failed to update passenger status");
+  }
+};
+
+// Remove a passenger from ride
+export const removePassenger = async (req, res) => {
+  const { rideId, passengerId } = req.params;
+  const requesterId = req.user.id;
+
+  if (!rideId || !passengerId) {
+    throw new BadRequestError("Ride ID and passenger ID are required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Check authorization: either the passenger themselves or the rider can remove
+    const isRider = ride.rider && ride.rider._id.toString() === requesterId;
+    const isPassenger = passengerId === requesterId;
+
+    if (!isRider && !isPassenger) {
+      throw new BadRequestError("You are not authorized to remove this passenger");
+    }
+
+    // Find passenger
+    const passengerIndex = ride.passengers.findIndex(p => p.userId.toString() === passengerId);
+    if (passengerIndex === -1) {
+      throw new NotFoundError("Passenger not found in this ride");
+    }
+
+    const passenger = ride.passengers[passengerIndex];
+
+    // Don't allow removing the original booker if they're the only passenger
+    if (passenger.isOriginalBooker && ride.passengers.length === 1) {
+      throw new BadRequestError("Cannot remove the original booker when they are the only passenger. Cancel the ride instead.");
+    }
+
+    // Remove passenger
+    ride.passengers.splice(passengerIndex, 1);
+    ride.currentPassengerCount = ride.passengers.length;
+    await ride.save();
+
+    console.log(`👋 Passenger ${passenger.firstName} ${passenger.lastName} removed from ride ${rideId}. Remaining passengers: ${ride.currentPassengerCount}`);
+
+    // Broadcast passenger update to all connected clients
+    if (req.io) {
+      const updatedRide = await Ride.findById(rideId)
+        .populate("customer", "firstName lastName phone")
+        .populate("rider", "firstName lastName phone vehicleType");
+      
+      req.io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+      
+      // Notify the removed passenger
+      const passengerSocket = [...req.io.sockets.sockets.values()].find(
+        socket => socket.user?.id === passengerId
+      );
+      if (passengerSocket) {
+        passengerSocket.emit("removedFromRide", {
+          rideId,
+          message: isPassenger ? "You have left the ride" : "You have been removed from the ride"
+        });
+      }
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: "Passenger removed successfully",
+      ride,
+    });
+  } catch (error) {
+    console.error("Error removing passenger:", error);
+    throw new BadRequestError(error.message || "Failed to remove passenger");
+  }
+};
+
+// Get available rides that can accept new passengers
+export const getAvailableRidesForJoining = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    // Find rides that are:
+    // 1. In progress (START or ARRIVED status)
+    // 2. Accepting new passengers
+    // 3. Not full
+    // 4. User is not already in
+    const availableRides = await Ride.find({
+      status: { $in: ["SEARCHING_FOR_RIDER", "START", "ARRIVED"] },
+      acceptingNewPassengers: true,
+      currentPassengerCount: { $lt: 6 },
+      "passengers.userId": { $ne: userId }
+    })
+    .populate("customer", "firstName lastName phone")
+    .populate("rider", "firstName lastName phone vehicleType")
+    .sort({ createdAt: -1 });
+
+    console.log(`🔍 Found ${availableRides.length} available rides for user ${userId} to join`);
+
+    res.status(StatusCodes.OK).json({
+      message: "Available rides retrieved successfully",
+      count: availableRides.length,
+      rides: availableRides,
+    });
+  } catch (error) {
+    console.error("Error retrieving available rides:", error);
+    throw new BadRequestError("Failed to retrieve available rides");
+  }
+};
+
+// Toggle accepting new passengers (for rider)
+export const toggleAcceptingPassengers = async (req, res) => {
+  const { rideId } = req.params;
+  const riderId = req.user.id;
+
+  if (!rideId) {
+    throw new BadRequestError("Ride ID is required");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Verify that the requester is the assigned rider
+    if (!ride.rider || ride.rider._id.toString() !== riderId) {
+      throw new BadRequestError("Only the assigned rider can toggle passenger acceptance");
+    }
+
+    ride.acceptingNewPassengers = !ride.acceptingNewPassengers;
+    await ride.save();
+
+    console.log(`🚦 Ride ${rideId} ${ride.acceptingNewPassengers ? 'now accepting' : 'stopped accepting'} new passengers`);
+
+    // Broadcast update
+    if (req.io) {
+      const updatedRide = await Ride.findById(rideId)
+        .populate("customer", "firstName lastName phone")
+        .populate("rider", "firstName lastName phone vehicleType");
+      
+      req.io.to(`ride_${rideId}`).emit("passengerUpdate", updatedRide);
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: `Ride is ${ride.acceptingNewPassengers ? 'now accepting' : 'no longer accepting'} new passengers`,
+      acceptingNewPassengers: ride.acceptingNewPassengers,
+      ride,
+    });
+  } catch (error) {
+    console.error("Error toggling passenger acceptance:", error);
+    throw new BadRequestError(error.message || "Failed to toggle passenger acceptance");
+  }
+};
+
+// ============================================
+
 export const createRide = async (req, res) => {
   const { vehicle, pickup, drop } = req.body;
   const customerId = req.user.id; // Fixed: Use req.user.id instead of req.user
@@ -468,6 +988,10 @@ export const createRide = async (req, res) => {
     
     console.log(`🔑 Creating ride with OTP: ${otp}`);
 
+    // Get customer info for passengers array
+    const User = (await import('../models/User.js')).default;
+    const customer = await User.findById(customerId).select('firstName lastName phone');
+
     const ride = await Ride.create({
       customer: customerId,
       pickup,
@@ -477,9 +1001,22 @@ export const createRide = async (req, res) => {
       fare,
       otp,
       status: "SEARCHING_FOR_RIDER",
+      // Initialize passengers array with the original booker
+      passengers: [{
+        userId: customerId,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        phone: customer.phone,
+        status: "WAITING",
+        isOriginalBooker: true,
+        joinedAt: new Date(),
+      }],
+      currentPassengerCount: 1,
+      maxPassengers: 6,
+      acceptingNewPassengers: true,
     });
 
-    console.log(`✅ Ride created with ID: ${ride._id}, OTP: ${otp}`);
+    console.log(`✅ Ride created with ID: ${ride._id}, OTP: ${otp}, Initial passenger: ${customer.firstName} ${customer.lastName}`);
 
     // Populate the ride with customer info
     const populatedRide = await Ride.findById(ride._id).populate("customer", "firstName lastName phone");

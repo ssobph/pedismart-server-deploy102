@@ -62,6 +62,53 @@ const rideSchema = new Schema(
       default: [],
       // Array of rider IDs who have cancelled this ride - they won't see it again
     },
+    // ============================================
+    // MULTI-PASSENGER FEATURE (Up to 6 passengers)
+    // ============================================
+    passengers: [{
+      userId: {
+        type: Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      firstName: { type: String, required: true },
+      lastName: { type: String, required: true },
+      phone: { type: String },
+      status: {
+        type: String,
+        enum: ["WAITING", "ONBOARD", "DROPPED"],
+        default: "WAITING",
+      },
+      joinedAt: {
+        type: Date,
+        default: Date.now,
+      },
+      boardedAt: {
+        type: Date,
+        default: null,
+      },
+      isOriginalBooker: {
+        type: Boolean,
+        default: false,
+      }
+    }],
+    maxPassengers: {
+      type: Number,
+      default: 6,
+      min: 1,
+      max: 6,
+    },
+    currentPassengerCount: {
+      type: Number,
+      default: 1,
+      min: 0,
+      max: 6,
+    },
+    acceptingNewPassengers: {
+      type: Boolean,
+      default: true, // Allows passengers to join in-progress rides
+    },
+    // ============================================
   },
   {
     timestamps: true,

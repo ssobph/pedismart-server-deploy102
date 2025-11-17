@@ -42,7 +42,6 @@ export const getAllUsers = async (req, res) => {
       queryObject.$or = [
         { photo: { $exists: true, $ne: null } },
         { schoolIdDocument: { $exists: true, $ne: null } },
-        { staffFacultyIdDocument: { $exists: true, $ne: null } },
         { driverLicense: { $exists: true, $ne: null } },
         { cor: { $exists: true, $ne: null } }
       ];
@@ -50,7 +49,6 @@ export const getAllUsers = async (req, res) => {
       queryObject.$and = [
         { photo: { $in: [null, undefined, ''] } },
         { schoolIdDocument: { $in: [null, undefined, ''] } },
-        { staffFacultyIdDocument: { $in: [null, undefined, ''] } },
         { driverLicense: { $in: [null, undefined, ''] } },
         { cor: { $in: [null, undefined, ''] } }
       ];
