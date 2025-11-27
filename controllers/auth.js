@@ -4,6 +4,7 @@ import { BadRequestError, UnauthenticatedError } from "../errors/index.js";
 import jwt from "jsonwebtoken";
 import { generateVerificationCode, sendVerificationEmail } from "../utils/emailService.js";
 import { upload } from "../utils/cloudinary.js";
+import { logAuthEvent } from "./authenticationLog.js";
 
 // Simple test endpoint
 export const testAuth = async (req, res) => {
@@ -36,6 +37,15 @@ export const login = async (req, res) => {
     
     if (!user) {
       console.log("User not found with email and role combination");
+      // Log failed login attempt
+      await logAuthEvent({
+        email,
+        userRole: role,
+        eventType: 'LOGIN_FAILED',
+        success: false,
+        failureReason: 'User not found with email and role combination',
+        description: `Failed login attempt for ${email} as ${role} - user not found`
+      }, req);
       throw new UnauthenticatedError("Invalid credentials");
     }
 
@@ -43,6 +53,16 @@ export const login = async (req, res) => {
     const isPasswordCorrect = await user.comparePassword(password);
     if (!isPasswordCorrect) {
       console.log("Password incorrect");
+      // Log failed login attempt
+      await logAuthEvent({
+        user: user._id,
+        email,
+        userRole: role,
+        eventType: 'LOGIN_FAILED',
+        success: false,
+        failureReason: 'Incorrect password',
+        description: `Failed login attempt for ${email} as ${role} - incorrect password`
+      }, req);
       throw new UnauthenticatedError("Invalid credentials");
     }
 
@@ -50,6 +70,16 @@ export const login = async (req, res) => {
     if (role !== 'admin') {
       if (user.status === "disapproved") {
         console.log("User is disapproved");
+        // Log blocked login attempt
+        await logAuthEvent({
+          user: user._id,
+          email,
+          userRole: role,
+          eventType: 'LOGIN_BLOCKED',
+          success: false,
+          failureReason: 'Account disapproved',
+          description: `Login blocked for ${email} - account is disapproved`
+        }, req);
         
         // Check if user has a penalty
         if (user.penaltyLiftDate) {
@@ -78,6 +108,16 @@ export const login = async (req, res) => {
         }
       } else if (user.status === "pending") {
         console.log("User is pending approval");
+        // Log blocked login attempt
+        await logAuthEvent({
+          user: user._id,
+          email,
+          userRole: role,
+          eventType: 'LOGIN_BLOCKED',
+          success: false,
+          failureReason: 'Account pending approval',
+          description: `Login blocked for ${email} - account is pending approval`
+        }, req);
         return res.status(StatusCodes.FORBIDDEN).json({
           message: "Your account is pending approval. Please wait for an administrator to approve your account.",
           status: "pending",
@@ -89,6 +129,16 @@ export const login = async (req, res) => {
     console.log("Password correct, generating tokens");
     const accessToken = user.createAccessToken();
     const refreshToken = user.createRefreshToken();
+
+    // Log successful login
+    await logAuthEvent({
+      user: user._id,
+      email,
+      userRole: role,
+      eventType: 'LOGIN_SUCCESS',
+      success: true,
+      description: `Successful login for ${email} as ${role}`
+    }, req);
 
     return res.status(StatusCodes.OK).json({
       message: "User logged in successfully",
@@ -543,8 +593,38 @@ export const forgotPassword = async (req, res) => {
     const emailSent = await sendVerificationEmail(email, verificationCode);
     
     if (!emailSent) {
+      // Log failed OTP send
+      await logAuthEvent({
+        user: user._id,
+        email,
+        userRole: role,
+        eventType: 'OTP_SENT',
+        success: false,
+        failureReason: 'Failed to send verification email',
+        description: `Failed to send password reset OTP to ${email}`
+      }, req);
       throw new Error("Failed to send verification email");
     }
+
+    // Log successful OTP send
+    await logAuthEvent({
+      user: user._id,
+      email,
+      userRole: role,
+      eventType: 'OTP_SENT',
+      success: true,
+      description: `Password reset OTP sent to ${email}`
+    }, req);
+
+    // Log password reset request
+    await logAuthEvent({
+      user: user._id,
+      email,
+      userRole: role,
+      eventType: 'PASSWORD_RESET_REQUEST',
+      success: true,
+      description: `Password reset requested for ${email}`
+    }, req);
 
     console.log(`Password reset code sent to ${email}`);
     
@@ -584,12 +664,42 @@ export const verifyCode = async (req, res) => {
     console.log(`Match? ${user.resetPasswordCode === verificationCode}`);
     
     if (!user.resetPasswordCode || user.resetPasswordCode !== verificationCode) {
+      // Log failed OTP verification
+      await logAuthEvent({
+        user: user._id,
+        email,
+        userRole: role,
+        eventType: 'OTP_FAILED',
+        success: false,
+        failureReason: 'Invalid verification code',
+        description: `Invalid OTP entered for ${email}`
+      }, req);
       throw new BadRequestError("Invalid verification code");
     }
 
     if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      // Log expired OTP
+      await logAuthEvent({
+        user: user._id,
+        email,
+        userRole: role,
+        eventType: 'OTP_EXPIRED',
+        success: false,
+        failureReason: 'Verification code expired',
+        description: `Expired OTP used for ${email}`
+      }, req);
       throw new BadRequestError("Verification code has expired");
     }
+
+    // Log successful OTP verification
+    await logAuthEvent({
+      user: user._id,
+      email,
+      userRole: role,
+      eventType: 'OTP_VERIFIED',
+      success: true,
+      description: `OTP verified successfully for ${email}`
+    }, req);
 
     // Code is valid, but we don't reset the password or clear the code yet
     console.log(`Verification code valid for ${email}`);
@@ -653,6 +763,16 @@ export const resetPassword = async (req, res) => {
     user.resetPasswordExpires = undefined;
     await user.save();
 
+    // Log successful password reset
+    await logAuthEvent({
+      user: user._id,
+      email,
+      userRole: role,
+      eventType: 'PASSWORD_RESET_SUCCESS',
+      success: true,
+      description: `Password reset successful for ${email}`
+    }, req);
+
     console.log(`Password reset successful for ${email}`);
     
     res.status(StatusCodes.OK).json({
@@ -660,6 +780,17 @@ export const resetPassword = async (req, res) => {
     });
   } catch (error) {
     console.error('Reset password error:', error);
+    
+    // Log failed password reset
+    await logAuthEvent({
+      email,
+      userRole: role,
+      eventType: 'PASSWORD_RESET_FAILED',
+      success: false,
+      failureReason: error.message,
+      description: `Password reset failed for ${email}: ${error.message}`
+    }, req);
+    
     if (error instanceof BadRequestError) {
       throw error;
     }

@@ -1,4 +1,5 @@
 import Ride from "../models/Ride.js";
+import CheckpointSnapshot from "../models/CheckpointSnapshot.js";
 import { BadRequestError, NotFoundError } from "../errors/index.js";
 import { StatusCodes } from "http-status-codes";
 // COMMENTED OUT: Payment/Fare - Driver handles pricing manually
@@ -9,6 +10,14 @@ import {
   MAX_DISTANCE_KM,
 } from "../utils/mapUtils.js";
 import { broadcastNewRideRequest, broadcastRideAccepted } from "./sockets.js";
+import {
+  createAcceptedCheckpoint,
+  createPickupCheckpoint,
+  createDropoffCheckpoint,
+} from "../utils/checkpointUtils.js";
+
+// Route deviation threshold (percentage)
+const ROUTE_DEVIATION_THRESHOLD = 20; // Flag if route is 20% longer than estimated
 
 
 export const acceptRide = async (req, res) => {
@@ -69,7 +78,58 @@ export const acceptRide = async (req, res) => {
 
     ride.rider = riderId;
     ride.status = "START";
+    
+    // ============================================
+    // TRIP LOG: Record accept time and start time
+    // ============================================
+    if (!ride.tripLogs) {
+      ride.tripLogs = {};
+    }
+    ride.tripLogs.acceptTime = new Date();
+    ride.tripLogs.startTime = new Date();
+    console.log(`📊 Trip Log: Ride ${rideId} accepted at ${ride.tripLogs.acceptTime}`);
+    // ============================================
+    
+    // ============================================
+    // RIDER LOCATION: Store rider's location for distance calculation
+    // ============================================
+    const riderLocationFromBody = req.body.location;
+    if (riderLocationFromBody && riderLocationFromBody.latitude && riderLocationFromBody.longitude) {
+      ride.riderLocation = {
+        latitude: riderLocationFromBody.latitude,
+        longitude: riderLocationFromBody.longitude,
+        heading: riderLocationFromBody.heading || null,
+        updatedAt: new Date(),
+      };
+      console.log(`📍 Rider location stored: ${riderLocationFromBody.latitude}, ${riderLocationFromBody.longitude}`);
+    }
+    // ============================================
+    
     await ride.save();
+
+    // ============================================
+    // CHECKPOINT SNAPSHOT: Record ACCEPTED checkpoint
+    // ============================================
+    try {
+      // Get rider's current location from request body or use pickup as fallback
+      const riderLocation = req.body.location || {
+        latitude: ride.pickup.latitude,
+        longitude: ride.pickup.longitude,
+      };
+      
+      await createAcceptedCheckpoint(
+        rideId,
+        riderId,
+        ride.customer._id || ride.customer,
+        riderLocation,
+        ride.pickup.address
+      );
+      console.log(`📍 Checkpoint: ACCEPTED snapshot created for ride ${rideId}`);
+    } catch (checkpointError) {
+      console.error(`⚠️ Failed to create ACCEPTED checkpoint:`, checkpointError);
+      // Don't fail the ride acceptance if checkpoint creation fails
+    }
+    // ============================================
 
     ride = await ride.populate("rider", "firstName lastName phone vehicleType");
 
@@ -161,6 +221,74 @@ export const updateRideStatus = async (req, res) => {
     ride.status = status;
     
     // ============================================
+    // TRIP LOG: Record timestamps for each status change
+    // ============================================
+    if (!ride.tripLogs) {
+      ride.tripLogs = {};
+    }
+    
+    if (status === "ARRIVED") {
+      // Driver arrived at pickup location - record pickup time
+      ride.tripLogs.pickupTime = new Date();
+      console.log(`📊 Trip Log: Ride ${rideId} pickup at ${ride.tripLogs.pickupTime}`);
+    } else if (status === "COMPLETED") {
+      // Trip completed - record dropoff and end time
+      ride.tripLogs.dropoffTime = new Date();
+      ride.tripLogs.endTime = new Date();
+      // Store final distance
+      ride.finalDistance = ride.distance;
+      console.log(`📊 Trip Log: Ride ${rideId} completed at ${ride.tripLogs.endTime}, final distance: ${ride.finalDistance}km`);
+      
+      // ============================================
+      // ROUTE LOGS: Calculate distances on completion
+      // ============================================
+      try {
+        // Initialize routeLogs if not exists
+        if (!ride.routeLogs) {
+          ride.routeLogs = {
+            estimatedDistance: ride.distance,
+            actualDistance: null,
+            routeDistance: null,
+            deviationPercentage: null,
+            hasSignificantDeviation: false,
+          };
+        }
+        
+        // 1. Actual Distance: Direct path from pickup to dropoff
+        const actualDistance = calculateDistance(
+          ride.pickup.latitude,
+          ride.pickup.longitude,
+          ride.drop.latitude,
+          ride.drop.longitude
+        );
+        ride.routeLogs.actualDistance = actualDistance;
+        
+        // 2. Route Distance: Calculate from GPS checkpoints (driver's actual path)
+        const routeDistance = await CheckpointSnapshot.calculateTotalDistance(rideId);
+        ride.routeLogs.routeDistance = routeDistance;
+        
+        // 3. Calculate deviation percentage
+        const estimatedDistance = ride.routeLogs.estimatedDistance || ride.distance;
+        if (estimatedDistance > 0 && routeDistance > 0) {
+          const deviation = ((routeDistance - estimatedDistance) / estimatedDistance) * 100;
+          ride.routeLogs.deviationPercentage = Math.round(deviation * 100) / 100; // Round to 2 decimal places
+          ride.routeLogs.hasSignificantDeviation = deviation > ROUTE_DEVIATION_THRESHOLD;
+          
+          if (ride.routeLogs.hasSignificantDeviation) {
+            console.log(`⚠️ Route Deviation Alert: Ride ${rideId} has ${deviation.toFixed(1)}% deviation (threshold: ${ROUTE_DEVIATION_THRESHOLD}%)`);
+          }
+        }
+        
+        console.log(`🛣️ Route Logs: Ride ${rideId} - Estimated: ${estimatedDistance.toFixed(2)}km, Actual: ${actualDistance.toFixed(2)}km, Route: ${routeDistance.toFixed(2)}km`);
+      } catch (routeLogError) {
+        console.error(`⚠️ Failed to calculate route logs for ride ${rideId}:`, routeLogError);
+        // Don't fail the status update if route log calculation fails
+      }
+      // ============================================
+    }
+    // ============================================
+    
+    // ============================================
     // AUTO-UPDATE PASSENGER STATUSES
     // ============================================
     if (ride.passengers && ride.passengers.length > 0) {
@@ -199,6 +327,49 @@ export const updateRideStatus = async (req, res) => {
     
     // Log confirmation of successful update
     console.log(`✅ Ride ${rideId} status successfully updated to ${status}`);
+
+    // ============================================
+    // CHECKPOINT SNAPSHOT: Record status-based checkpoints
+    // ============================================
+    try {
+      // Get location from request body or use appropriate location based on status
+      const location = req.body.location || (status === "ARRIVED" ? {
+        latitude: ride.pickup.latitude,
+        longitude: ride.pickup.longitude,
+      } : {
+        latitude: ride.drop.latitude,
+        longitude: ride.drop.longitude,
+      });
+      
+      const riderId = ride.rider._id || ride.rider;
+      const customerId = ride.customer._id || ride.customer;
+      
+      if (status === "ARRIVED") {
+        // PICKUP checkpoint - driver reached pickup location
+        await createPickupCheckpoint(
+          rideId,
+          riderId,
+          customerId,
+          location,
+          ride.pickup.address
+        );
+        console.log(`📍 Checkpoint: PICKUP snapshot created for ride ${rideId}`);
+      } else if (status === "COMPLETED") {
+        // DROPOFF checkpoint - trip completed
+        await createDropoffCheckpoint(
+          rideId,
+          riderId,
+          customerId,
+          location,
+          ride.drop.address
+        );
+        console.log(`📍 Checkpoint: DROPOFF snapshot created for ride ${rideId}`);
+      }
+    } catch (checkpointError) {
+      console.error(`⚠️ Failed to create checkpoint for status ${status}:`, checkpointError);
+      // Don't fail the status update if checkpoint creation fails
+    }
+    // ============================================
 
     // Broadcast to ride room
     if (req.io) {
@@ -976,12 +1147,20 @@ export const createRide = async (req, res) => {
     
     console.log(`🛣️ Distance calculated: ${distance.toFixed(2)} km`);
     
-    // COMMENTED OUT: Payment/Fare - Driver handles pricing manually
-    // Calculate fare based on vehicle type and distance
-    // const fareOptions = calculateFare(distance);
-    // const fare = fareOptions[vehicle];
-    // console.log(`💰 Fare calculated: ${fare} for ${vehicle}`);
-    const fare = 0; // Fare will be determined by driver
+    // Calculate fare using dynamic fare configuration from database
+    let fare = 0;
+    let fareBreakdown = null;
+    try {
+      const FareConfig = (await import('../models/FareConfig.js')).default;
+      const fareResult = await FareConfig.calculateFare(vehicle, distance, 1);
+      fare = fareResult.totalFare;
+      fareBreakdown = fareResult.breakdown;
+      console.log(`💰 Fare calculated: ₱${fare} for ${vehicle} (${distance.toFixed(2)} km)`);
+    } catch (fareError) {
+      console.log(`⚠️ Could not calculate fare, using default: ${fareError.message}`);
+      // Fallback to simple calculation if FareConfig fails
+      fare = Math.max(20, distance * 2.8);
+    }
 
     // Generate OTP
     const otp = generateOTP(); // Fixed: Use correct function name
@@ -1014,6 +1193,23 @@ export const createRide = async (req, res) => {
       currentPassengerCount: 1,
       maxPassengers: 6,
       acceptingNewPassengers: true,
+      // ============================================
+      // TRIP LOG: Record request time when ride is created
+      // ============================================
+      tripLogs: {
+        requestTime: new Date(),
+      },
+      // ============================================
+      // ROUTE LOGS: Store estimated distance from routing calculation
+      // ============================================
+      routeLogs: {
+        estimatedDistance: distance, // Distance from routing API/calculation
+        actualDistance: null, // Will be calculated on completion
+        routeDistance: null, // Will be calculated from GPS checkpoints
+        deviationPercentage: null,
+        hasSignificantDeviation: false,
+      },
+      // ============================================
     });
 
     console.log(`✅ Ride created with ID: ${ride._id}, OTP: ${otp}, Initial passenger: ${customer.firstName} ${customer.lastName}`);

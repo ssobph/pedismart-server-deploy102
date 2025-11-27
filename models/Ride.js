@@ -38,6 +38,13 @@ const rideSchema = new Schema(
       ref: "User",
       default: null,
     },
+    // Rider's current/last known location (updated when rider accepts and during ride)
+    riderLocation: {
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      heading: { type: Number, default: null },
+      updatedAt: { type: Date, default: null },
+    },
     status: {
       type: String,
       enum: ["SEARCHING_FOR_RIDER", "START", "ARRIVED", "COMPLETED", "CANCELLED", "TIMEOUT"],
@@ -107,6 +114,92 @@ const rideSchema = new Schema(
     acceptingNewPassengers: {
       type: Boolean,
       default: true, // Allows passengers to join in-progress rides
+    },
+    // ============================================
+
+    // ============================================
+    // TRIP LOG TIMESTAMPS (for audits, disputes, analytics)
+    // ============================================
+    tripLogs: {
+      // When the ride request was created (same as createdAt, but explicit)
+      requestTime: {
+        type: Date,
+        default: null,
+      },
+      // When driver accepts the booking
+      acceptTime: {
+        type: Date,
+        default: null,
+      },
+      // When driver starts navigation/goes online for this ride
+      startTime: {
+        type: Date,
+        default: null,
+      },
+      // When passenger is picked up (driver arrives at pickup)
+      pickupTime: {
+        type: Date,
+        default: null,
+      },
+      // When passenger is dropped off
+      dropoffTime: {
+        type: Date,
+        default: null,
+      },
+      // When trip is fully completed
+      endTime: {
+        type: Date,
+        default: null,
+      },
+      // Auto-cancellation fields (set by system job)
+      autoCancelledAt: {
+        type: Date,
+        default: null,
+      },
+      autoCancelledReason: {
+        type: String,
+        default: null,
+      },
+    },
+    // Final computed distance after trip completion (in km)
+    finalDistance: {
+      type: Number,
+      default: null,
+    },
+    // ============================================
+
+    // ============================================
+    // ROUTE LOGS (for route deviation detection, fair pricing, analytics)
+    // ============================================
+    routeLogs: {
+      // Estimated distance from routing API (straight-line or API-calculated route)
+      // This is the distance shown to customer when booking
+      estimatedDistance: {
+        type: Number,
+        default: null,
+      },
+      // Actual distance computed from trip path (pickup to dropoff coordinates)
+      // This is the direct path distance between pickup and dropoff
+      actualDistance: {
+        type: Number,
+        default: null,
+      },
+      // Route distance - the path the driver actually took
+      // Calculated from GPS checkpoints during the ride
+      routeDistance: {
+        type: Number,
+        default: null,
+      },
+      // Deviation percentage ((routeDistance - estimatedDistance) / estimatedDistance * 100)
+      deviationPercentage: {
+        type: Number,
+        default: null,
+      },
+      // Flag if route deviation exceeds threshold (e.g., > 20%)
+      hasSignificantDeviation: {
+        type: Boolean,
+        default: false,
+      },
     },
     // ============================================
   },

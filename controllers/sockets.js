@@ -6,8 +6,11 @@ import Rating from "../models/Rating.js";
 import Chat from "../models/Chat.js";
 import Message from "../models/Message.js";
 import { calculateDistance, MAX_DISTANCE_KM } from "../utils/mapUtils.js";
+import { createOngoingCheckpoint } from "../utils/checkpointUtils.js";
 
 const onDutyRiders = new Map();
+// Track last checkpoint time per ride to avoid too frequent updates
+const lastCheckpointTime = new Map();
 
 // ============================================
 // Helper function to filter rides by distance
@@ -176,7 +179,7 @@ const handleSocketConnection = (io) => {
         updateNearbyriders();
       });
 
-      socket.on("updateLocation", (coords) => {
+      socket.on("updateLocation", async (coords) => {
         if (onDutyRiders.has(user.id)) {
           onDutyRiders.get(user.id).coords = coords;
           console.log(`rider ${user.id} updated location.`);
@@ -185,6 +188,64 @@ const handleSocketConnection = (io) => {
             riderId: user.id,
             coords,
           });
+
+          // ============================================
+          // UPDATE RIDER LOCATION IN DATABASE for active rides
+          // This ensures customer can see distance even if socket updates are missed
+          // ============================================
+          if (coords.rideId && coords.latitude && coords.longitude) {
+            try {
+              await Ride.findByIdAndUpdate(coords.rideId, {
+                riderLocation: {
+                  latitude: coords.latitude,
+                  longitude: coords.longitude,
+                  heading: coords.heading || null,
+                  updatedAt: new Date(),
+                }
+              });
+              console.log(`📍 Updated rider location in DB for ride ${coords.rideId}`);
+            } catch (dbError) {
+              console.error(`⚠️ Failed to update rider location in DB:`, dbError);
+            }
+          }
+          // ============================================
+
+          // ============================================
+          // CHECKPOINT SNAPSHOT: Create ONGOING checkpoint during active ride
+          // Only create checkpoint every 2 minutes to avoid excessive storage
+          // ============================================
+          if (coords.rideId) {
+            const rideId = coords.rideId;
+            const now = Date.now();
+            const lastTime = lastCheckpointTime.get(rideId) || 0;
+            const CHECKPOINT_INTERVAL = 2 * 60 * 1000; // 2 minutes
+
+            if (now - lastTime >= CHECKPOINT_INTERVAL) {
+              try {
+                // Verify ride is in progress
+                const ride = await Ride.findById(rideId);
+                if (ride && ['START', 'ARRIVED'].includes(ride.status)) {
+                  await createOngoingCheckpoint(
+                    rideId,
+                    user.id,
+                    ride.customer,
+                    {
+                      latitude: coords.latitude,
+                      longitude: coords.longitude,
+                      heading: coords.heading,
+                      speed: coords.speed,
+                    },
+                    null // Address will be null for ongoing checkpoints
+                  );
+                  lastCheckpointTime.set(rideId, now);
+                  console.log(`📍 Checkpoint: ONGOING snapshot created for ride ${rideId}`);
+                }
+              } catch (checkpointError) {
+                console.error(`⚠️ Failed to create ONGOING checkpoint:`, checkpointError);
+              }
+            }
+          }
+          // ============================================
         }
       });
 
@@ -464,12 +525,40 @@ const handleSocketConnection = (io) => {
       });
     }
 
-    socket.on("subscribeToriderLocation", (riderId) => {
+    socket.on("subscribeToriderLocation", async (riderId) => {
+      socket.join(`rider_${riderId}`);
+      console.log(`User ${user.id} subscribed to rider ${riderId}'s location.`);
+      
+      // First try to get rider location from onDutyRiders map (real-time)
       const rider = onDutyRiders.get(riderId);
-      if (rider) {
-        socket.join(`rider_${riderId}`);
+      if (rider && rider.coords) {
         socket.emit("riderLocationUpdate", { riderId, coords: rider.coords });
-        console.log(`User ${user.id} subscribed to rider ${riderId}'s location.`);
+        console.log(`📍 Sent real-time rider location from memory for rider ${riderId}`);
+        return;
+      }
+      
+      // Fallback: Try to get rider location from the active ride in database
+      try {
+        const activeRide = await Ride.findOne({
+          rider: riderId,
+          status: { $in: ['START', 'ARRIVED'] }
+        }).select('riderLocation');
+        
+        if (activeRide && activeRide.riderLocation && activeRide.riderLocation.latitude) {
+          socket.emit("riderLocationUpdate", { 
+            riderId, 
+            coords: {
+              latitude: activeRide.riderLocation.latitude,
+              longitude: activeRide.riderLocation.longitude,
+              heading: activeRide.riderLocation.heading || 0,
+            }
+          });
+          console.log(`📍 Sent rider location from database for rider ${riderId}`);
+        } else {
+          console.log(`⚠️ No rider location available for rider ${riderId}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error fetching rider location from database:`, error);
       }
     });
 
@@ -1296,9 +1385,18 @@ const handleSocketConnection = (io) => {
 
     // ============ END MULTI-PASSENGER SOCKET EVENTS ============
 
-    socket.on("disconnect", () => {
-      if (user.role === "rider") onDutyRiders.delete(user.id);
-      console.log(`${user.role} ${user.id} disconnected.`);
+    // ============ ERROR HANDLING ============
+    socket.on("error", (error) => {
+      console.error(`❌ Socket error for ${user.role} ${user.id}:`, error.message);
+    });
+
+    socket.on("disconnect", (reason) => {
+      try {
+        if (user.role === "rider") onDutyRiders.delete(user.id);
+        console.log(`${user.role} ${user.id} disconnected. Reason: ${reason}`);
+      } catch (error) {
+        console.error(`❌ Error during disconnect cleanup for ${user.id}:`, error.message);
+      }
     });
 
     function updateNearbyriders() {

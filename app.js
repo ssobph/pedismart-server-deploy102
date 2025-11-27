@@ -3,6 +3,22 @@ import dotenv from 'dotenv';
 // Load environment variables first, before any other imports
 dotenv.config();
 
+// ============================================
+// Global error handlers to prevent server crashes
+// ============================================
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+  // Don't exit - keep the server running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+  // Don't exit - keep the server running
+});
+// ============================================
+
 // Log environment variables for debugging (without revealing secrets)
 console.log('Environment Variables Check:', {
   CLOUDINARY_API_NAME: process.env.CLOUDINARY_API_NAME ? 'Set' : 'Not set',
@@ -28,16 +44,27 @@ import adminRouter from './routes/admin.js';
 import adminManagementRouter from './routes/adminManagement.js';
 import analyticsRouter from './routes/analytics.js';
 import chatRouter from './routes/chat.js';
+import checkpointSnapshotRouter from './routes/checkpointSnapshot.js';
+import authenticationLogRouter from './routes/authenticationLog.js';
+import crashLogRouter from './routes/crashLog.js';
+import fareConfigRouter from './routes/fareConfig.js';
+import adminLoginAttemptRouter from './routes/adminLoginAttempt.js';
 
 // Import socket handler
 import handleSocketConnection from './controllers/sockets.js';
 
 // Import scheduled jobs
 import { initAutoApprovalJob } from './jobs/autoApprovalJob.js';
+import { initAutoCancelRideJob } from './jobs/autoCancelRideJob.js';
 
 EventEmitter.defaultMaxListeners = 20;
 
 const app = express();
+
+// Trust proxy - required for getting real client IP behind reverse proxies (Render, Nginx, etc.)
+// This enables req.ip to return the correct client IP from X-Forwarded-For header
+app.set('trust proxy', true);
+
 app.use(express.json());
 
 // CORS middleware
@@ -137,6 +164,29 @@ app.get('/debug/rides', async (req, res) => {
 
 const server = http.createServer(app);
 
+// ============================================
+// HTTP Server error handling to prevent crashes
+// ============================================
+server.on('error', (error) => {
+  console.error('❌ HTTP Server Error:', error.message);
+});
+
+server.on('clientError', (error, socket) => {
+  console.error('❌ Client Error:', error.message);
+  // Safely destroy the socket if it exists and has the destroy method
+  if (socket && typeof socket.destroy === 'function') {
+    socket.destroy();
+  }
+});
+
+// Handle connection errors gracefully
+server.on('connection', (socket) => {
+  socket.on('error', (error) => {
+    console.error('❌ Socket connection error:', error.message);
+  });
+});
+// ============================================
+
 // Enhanced Socket.IO configuration for better reliability on Render
 const io = new socketIo(server, { 
   cors: { origin: "*" },
@@ -149,6 +199,13 @@ const io = new socketIo(server, {
   maxHttpBufferSize: 1e8, // 100 MB
   // Allow more time for connections
   connectTimeout: 45000, // 45 seconds
+});
+
+// ============================================
+// Socket.IO error handling
+// ============================================
+io.engine.on('connection_error', (err) => {
+  console.error('❌ Socket.IO connection error:', err.message);
 });
 
 // Attach the WebSocket instance to the request object
@@ -169,6 +226,11 @@ app.use("/chat", authMiddleware, chatRouter);
 app.use("/admin", adminRouter);
 app.use("/api/admin-management", adminManagementRouter);
 app.use("/api/analytics", analyticsRouter);
+app.use("/api/checkpoints", checkpointSnapshotRouter);
+app.use("/api/authentication-logs", authenticationLogRouter);
+app.use("/api/crash-logs", crashLogRouter);
+app.use("/api/fare-config", fareConfigRouter);
+app.use("/api/admin-login-attempts", adminLoginAttemptRouter);
 
 // Middleware
 app.use(notFoundMiddleware);
@@ -181,6 +243,7 @@ const start = async () => {
     // Initialize scheduled jobs after database connection
     console.log('🔧 Initializing scheduled jobs...');
     initAutoApprovalJob(60); // Run every 60 minutes
+    initAutoCancelRideJob(15); // Run every 15 minutes - auto-cancel stale rides
     
     const PORT = process.env.PORT || 3000;
     server.listen(PORT, "0.0.0.0", () =>

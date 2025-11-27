@@ -1,5 +1,6 @@
 import Admin from '../models/Admin.js';
 import ActivityLog from '../models/ActivityLog.js';
+import AdminLoginAttempt from '../models/AdminLoginAttempt.js';
 import { StatusCodes } from 'http-status-codes';
 import { BadRequestError, NotFoundError, UnauthenticatedError } from '../errors/index.js';
 
@@ -492,30 +493,181 @@ export const getActivityLogs = async (req, res) => {
   }
 };
 
-// Admin login
+// Helper function to get real client IP address
+const getClientIP = (req) => {
+  // Check for various proxy headers (in order of reliability)
+  const forwardedFor = req.headers['x-forwarded-for'];
+  if (forwardedFor) {
+    // x-forwarded-for can contain multiple IPs, take the first one (original client)
+    const ips = forwardedFor.split(',').map(ip => ip.trim());
+    const clientIP = ips[0];
+    // Remove IPv6 prefix if present
+    return clientIP.replace(/^::ffff:/, '');
+  }
+  
+  // Check other common proxy headers
+  const realIP = req.headers['x-real-ip'];
+  if (realIP) {
+    return realIP.replace(/^::ffff:/, '');
+  }
+  
+  const cfConnectingIP = req.headers['cf-connecting-ip']; // Cloudflare
+  if (cfConnectingIP) {
+    return cfConnectingIP.replace(/^::ffff:/, '');
+  }
+  
+  const trueClientIP = req.headers['true-client-ip']; // Akamai, Cloudflare Enterprise
+  if (trueClientIP) {
+    return trueClientIP.replace(/^::ffff:/, '');
+  }
+  
+  // Fall back to direct connection IP
+  let ip = req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress;
+  
+  if (ip) {
+    // Remove IPv6 prefix for IPv4-mapped addresses
+    ip = ip.replace(/^::ffff:/, '');
+    // Handle localhost
+    if (ip === '::1') {
+      ip = '127.0.0.1';
+    }
+  }
+  
+  return ip || 'Unknown';
+};
+
+// Admin login with attempt tracking
 export const adminLogin = async (req, res) => {
+  const ipAddress = getClientIP(req);
+  const userAgent = req.headers['user-agent'];
+  
+  // Debug logging for IP address
+  console.log('🔐 Admin login attempt:', {
+    email: req.body?.email,
+    ipAddress,
+    'x-forwarded-for': req.headers['x-forwarded-for'],
+    'x-real-ip': req.headers['x-real-ip'],
+    'req.ip': req.ip,
+    'req.connection.remoteAddress': req.connection?.remoteAddress,
+  });
+  
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      throw new BadRequestError('Please provide email and password');
+      return res.status(StatusCodes.BAD_REQUEST).json({ 
+        success: false,
+        message: 'Please provide email and password' 
+      });
     }
 
-    const admin = await Admin.findOne({ email });
+    // Check if email is locked due to too many failed attempts
+    const isLocked = await AdminLoginAttempt.isEmailLocked(email, 5, 15);
+    if (isLocked) {
+      const remainingMinutes = await AdminLoginAttempt.getLockoutRemainingTime(email, 5, 15);
+      
+      // Log the blocked attempt
+      await AdminLoginAttempt.logAttempt({
+        email,
+        admin: null,
+        success: false,
+        failureReason: 'ACCOUNT_LOCKED',
+        ipAddress,
+        userAgent,
+      });
+      
+      return res.status(StatusCodes.TOO_MANY_REQUESTS).json({
+        success: false,
+        message: `Account temporarily locked due to too many failed attempts. Please try again in ${remainingMinutes} minute(s).`,
+        locked: true,
+        lockoutRemainingMinutes: remainingMinutes,
+      });
+    }
+
+    const admin = await Admin.findOne({ email: email.toLowerCase() });
     
     if (!admin) {
-      throw new UnauthenticatedError('Invalid credentials');
+      // Log failed attempt - invalid email
+      await AdminLoginAttempt.logAttempt({
+        email,
+        admin: null,
+        success: false,
+        failureReason: 'INVALID_EMAIL',
+        ipAddress,
+        userAgent,
+      });
+      
+      // Get remaining attempts
+      const failedAttempts = await AdminLoginAttempt.getRecentFailedAttempts(email, 15);
+      const remainingAttempts = Math.max(0, 5 - failedAttempts);
+      
+      return res.status(StatusCodes.UNAUTHORIZED).json({ 
+        success: false,
+        message: 'Invalid email or password',
+        remainingAttempts,
+      });
     }
 
     // Check if admin is active
     if (!admin.isActive) {
-      throw new UnauthenticatedError('Your account has been deactivated. Please contact a super-admin.');
+      // Log failed attempt - account deactivated
+      await AdminLoginAttempt.logAttempt({
+        email,
+        admin: admin._id,
+        success: false,
+        failureReason: 'ACCOUNT_DEACTIVATED',
+        ipAddress,
+        userAgent,
+      });
+      
+      return res.status(StatusCodes.UNAUTHORIZED).json({ 
+        success: false,
+        message: 'Your account has been deactivated. Please contact a super-admin.' 
+      });
     }
 
     const isPasswordCorrect = await admin.comparePassword(password);
     if (!isPasswordCorrect) {
-      throw new UnauthenticatedError('Invalid credentials');
+      // Log failed attempt - invalid password
+      await AdminLoginAttempt.logAttempt({
+        email,
+        admin: admin._id,
+        success: false,
+        failureReason: 'INVALID_PASSWORD',
+        ipAddress,
+        userAgent,
+      });
+      
+      // Get remaining attempts
+      const failedAttempts = await AdminLoginAttempt.getRecentFailedAttempts(email, 15);
+      const remainingAttempts = Math.max(0, 5 - failedAttempts);
+      
+      // Check if this was the 5th attempt (now locked)
+      if (remainingAttempts === 0) {
+        return res.status(StatusCodes.TOO_MANY_REQUESTS).json({
+          success: false,
+          message: 'Too many failed attempts. Account locked for 15 minutes.',
+          locked: true,
+          lockoutRemainingMinutes: 15,
+        });
+      }
+      
+      return res.status(StatusCodes.UNAUTHORIZED).json({ 
+        success: false,
+        message: 'Invalid email or password',
+        remainingAttempts,
+      });
     }
+
+    // Successful login - log it
+    await AdminLoginAttempt.logAttempt({
+      email,
+      admin: admin._id,
+      success: true,
+      failureReason: null,
+      ipAddress,
+      userAgent,
+    });
 
     // Update last login
     admin.lastLogin = new Date();
@@ -536,6 +688,7 @@ export const adminLogin = async (req, res) => {
     };
 
     return res.status(StatusCodes.OK).json({
+      success: true,
       message: 'Admin logged in successfully',
       user: adminData,
       access_token: accessToken,
@@ -544,13 +697,23 @@ export const adminLogin = async (req, res) => {
   } catch (error) {
     console.error('Admin login error:', error);
     
-    if (error.name === 'BadRequestError' || error.name === 'UnauthenticatedError') {
-      res.status(StatusCodes.UNAUTHORIZED).json({ message: error.message });
-      return;
+    // Log server error attempt
+    try {
+      await AdminLoginAttempt.logAttempt({
+        email: req.body?.email || 'unknown',
+        admin: null,
+        success: false,
+        failureReason: 'SERVER_ERROR',
+        ipAddress,
+        userAgent,
+      });
+    } catch (logError) {
+      console.error('Error logging failed attempt:', logError);
     }
     
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ 
-      message: 'Error during login',
+      success: false,
+      message: 'Error during login. Please try again.',
       error: error.message
     });
   }
