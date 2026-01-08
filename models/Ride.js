@@ -63,6 +63,11 @@ const rideSchema = new Schema(
       type: Date,
       default: null,
     },
+    cancellationReason: {
+      type: String,
+      default: null,
+      // Stores the reason for cancellation (Changed mind, Wrong destination, Emergency, Other: custom text)
+    },
     blacklistedRiders: {
       type: [Schema.Types.ObjectId],
       ref: "User",

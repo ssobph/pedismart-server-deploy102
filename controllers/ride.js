@@ -436,6 +436,7 @@ export const updateRideStatus = async (req, res) => {
 
 export const cancelRide = async (req, res) => {
   const { rideId } = req.params;
+  const { reason } = req.body; // Cancellation reason from client
   const userId = req.user.id;
 
   if (!rideId) {
@@ -494,14 +495,22 @@ export const cancelRide = async (req, res) => {
         ride.status = "CANCELLED";
         ride.cancelledBy = cancelledBy;
         ride.cancelledAt = new Date();
+        ride.cancellationReason = reason || null; // Save cancellation reason
         console.log(`🚫 Ride ${rideId} marked as CANCELLED by rider ${userId}`);
+        if (reason) {
+          console.log(`📝 Cancellation reason: ${reason}`);
+        }
       }
     } else {
       // Customer cancelled - mark ride as CANCELLED
       ride.status = "CANCELLED";
       ride.cancelledBy = cancelledBy;
       ride.cancelledAt = new Date();
+      ride.cancellationReason = reason || null; // Save cancellation reason
       console.log(`🚫 Ride ${rideId} cancelled by customer ${userId}, status updated to CANCELLED`);
+      if (reason) {
+        console.log(`📝 Cancellation reason: ${reason}`);
+      }
     }
     
     await ride.save();
