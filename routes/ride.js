@@ -13,7 +13,10 @@ import {
   updatePassengerStatus,
   removePassenger,
   getAvailableRidesForJoining,
-  toggleAcceptingPassengers
+  toggleAcceptingPassengers,
+  // Early stop endpoints
+  requestEarlyStop,
+  respondToEarlyStopRequest
 } from '../controllers/ride.js';
 
 const router = express.Router();
@@ -37,6 +40,13 @@ router.get('/available-for-joining', getAvailableRidesForJoining);
 router.patch('/passenger/:rideId/:passengerId', updatePassengerStatus);
 router.delete('/passenger/:rideId/:passengerId', removePassenger);
 router.patch('/toggle-accepting/:rideId', toggleAcceptingPassengers);
+// ============================================
+
+// ============================================
+// EARLY STOP ROUTES
+// ============================================
+router.post('/early-stop/:rideId', requestEarlyStop);
+router.post('/early-stop-response/:rideId', respondToEarlyStopRequest);
 // ============================================
 
 export default router;

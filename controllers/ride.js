@@ -1127,6 +1127,290 @@ export const toggleAcceptingPassengers = async (req, res) => {
 };
 
 // ============================================
+// EARLY STOP FEATURE - Complete ride before reaching drop-off
+// ============================================
+
+// Request early stop (customer requests to stop before drop-off)
+export const requestEarlyStop = async (req, res) => {
+  const { rideId } = req.params;
+  const { location, reason } = req.body;
+  const userId = req.user.id;
+
+  if (!rideId) {
+    throw new BadRequestError("Ride ID is required");
+  }
+
+  if (!location || !location.latitude || !location.longitude) {
+    throw new BadRequestError("Current location is required for early stop");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Only allow early stop during ARRIVED status (ride in progress)
+    if (ride.status !== "ARRIVED") {
+      throw new BadRequestError("Early stop can only be requested during an active ride (ARRIVED status)");
+    }
+
+    // Check if user is authorized (must be customer or rider)
+    const isCustomer = ride.customer._id.toString() === userId;
+    const isRider = ride.rider && ride.rider._id.toString() === userId;
+    
+    if (!isCustomer && !isRider) {
+      throw new BadRequestError("You are not authorized to request early stop for this ride");
+    }
+
+    const requestedBy = isCustomer ? "customer" : "rider";
+
+    // Get address for the early stop location using reverse geocoding
+    let earlyStopAddress = `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
+    try {
+      const { getCleanAddress } = await import('../utils/geocodingUtils.js');
+      earlyStopAddress = await getCleanAddress(location.latitude, location.longitude);
+    } catch (geocodeError) {
+      console.log(`⚠️ Could not geocode early stop location: ${geocodeError.message}`);
+    }
+
+    // Update ride with early stop information
+    ride.earlyStop = {
+      completedEarly: true,
+      location: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+      },
+      address: earlyStopAddress,
+      requestedBy: requestedBy,
+      requestedAt: new Date(),
+      reason: reason || null,
+    };
+
+    // Calculate the actual distance traveled (from pickup to early stop location)
+    const actualDistanceTraveled = calculateDistance(
+      ride.pickup.latitude,
+      ride.pickup.longitude,
+      location.latitude,
+      location.longitude
+    );
+
+    // Update route logs with actual distance
+    if (!ride.routeLogs) {
+      ride.routeLogs = {};
+    }
+    ride.routeLogs.actualDistance = actualDistanceTraveled;
+
+    // Mark ride as completed
+    ride.status = "COMPLETED";
+    
+    // Update trip logs
+    if (!ride.tripLogs) {
+      ride.tripLogs = {};
+    }
+    ride.tripLogs.dropoffTime = new Date();
+    ride.tripLogs.endTime = new Date();
+    ride.finalDistance = actualDistanceTraveled;
+
+    // Update all passengers to DROPPED
+    if (ride.passengers && ride.passengers.length > 0) {
+      ride.passengers.forEach(passenger => {
+        if (passenger.status === "ONBOARD" || passenger.status === "WAITING") {
+          passenger.status = "DROPPED";
+        }
+      });
+    }
+
+    await ride.save();
+
+    console.log(`🛑 Early stop completed for ride ${rideId}`);
+    console.log(`   Requested by: ${requestedBy}`);
+    console.log(`   Location: ${earlyStopAddress}`);
+    console.log(`   Distance traveled: ${actualDistanceTraveled.toFixed(2)} km`);
+    console.log(`   Original distance: ${ride.distance.toFixed(2)} km`);
+
+    // Create dropoff checkpoint at early stop location
+    try {
+      await createDropoffCheckpoint(
+        rideId,
+        ride.rider._id,
+        ride.customer._id,
+        location,
+        earlyStopAddress
+      );
+      console.log(`📍 Checkpoint: DROPOFF (early stop) snapshot created for ride ${rideId}`);
+    } catch (checkpointError) {
+      console.error(`⚠️ Failed to create early stop checkpoint:`, checkpointError);
+    }
+
+    // Broadcast ride completion to all parties
+    if (req.io) {
+      console.log(`📢 Broadcasting early stop completion for ride ${rideId}`);
+      
+      req.io.to(`ride_${rideId}`).emit("rideUpdate", ride);
+      req.io.to(`ride_${rideId}`).emit("rideCompleted", ride);
+      req.io.to(`ride_${rideId}`).emit("earlyStopCompleted", {
+        ride,
+        earlyStop: ride.earlyStop,
+        message: `Ride completed early at ${earlyStopAddress}`,
+      });
+
+      // Notify each passenger individually
+      ride.passengers.forEach(passenger => {
+        const passengerSocket = [...req.io.sockets.sockets.values()].find(
+          socket => socket.user?.id === passenger.userId.toString()
+        );
+        if (passengerSocket) {
+          passengerSocket.emit("yourStatusUpdated", {
+            status: "DROPPED",
+            ride: ride,
+            earlyStop: true,
+          });
+          console.log(`👤 Notified passenger ${passenger.firstName} of early stop completion`);
+        }
+      });
+
+      // Remove from all on-duty riders' lists
+      req.io.to("onDuty").emit("rideCompleted", {
+        _id: rideId,
+        rideId: rideId,
+        ride: ride,
+      });
+    }
+
+    res.status(StatusCodes.OK).json({
+      message: "Ride completed early successfully",
+      ride,
+      earlyStop: ride.earlyStop,
+      actualDistanceTraveled: actualDistanceTraveled.toFixed(2),
+      originalDistance: ride.distance.toFixed(2),
+    });
+  } catch (error) {
+    console.error("Error processing early stop:", error);
+    throw new BadRequestError(error.message || "Failed to process early stop request");
+  }
+};
+
+// Confirm or decline early stop request (for rider to confirm customer's request)
+export const respondToEarlyStopRequest = async (req, res) => {
+  const { rideId } = req.params;
+  const { action, location } = req.body; // action: 'confirm' or 'decline'
+  const riderId = req.user.id;
+
+  if (!rideId || !action) {
+    throw new BadRequestError("Ride ID and action are required");
+  }
+
+  if (!['confirm', 'decline'].includes(action)) {
+    throw new BadRequestError("Action must be 'confirm' or 'decline'");
+  }
+
+  try {
+    const ride = await Ride.findById(rideId)
+      .populate("customer", "firstName lastName phone")
+      .populate("rider", "firstName lastName phone vehicleType");
+
+    if (!ride) {
+      throw new NotFoundError("Ride not found");
+    }
+
+    // Verify requester is the rider
+    if (!ride.rider || ride.rider._id.toString() !== riderId) {
+      throw new BadRequestError("Only the assigned rider can respond to early stop requests");
+    }
+
+    if (action === 'confirm') {
+      // Use the provided location or rider's current location
+      const stopLocation = location || req.body.riderLocation;
+      
+      if (!stopLocation || !stopLocation.latitude || !stopLocation.longitude) {
+        throw new BadRequestError("Location is required to confirm early stop");
+      }
+
+      // Process the early stop (same logic as requestEarlyStop)
+      let earlyStopAddress = `${stopLocation.latitude.toFixed(6)}, ${stopLocation.longitude.toFixed(6)}`;
+      try {
+        const { getCleanAddress } = await import('../utils/geocodingUtils.js');
+        earlyStopAddress = await getCleanAddress(stopLocation.latitude, stopLocation.longitude);
+      } catch (geocodeError) {
+        console.log(`⚠️ Could not geocode early stop location: ${geocodeError.message}`);
+      }
+
+      ride.earlyStop = {
+        completedEarly: true,
+        location: {
+          latitude: stopLocation.latitude,
+          longitude: stopLocation.longitude,
+        },
+        address: earlyStopAddress,
+        requestedBy: "customer",
+        requestedAt: new Date(),
+        reason: "Customer requested early stop",
+      };
+
+      const actualDistanceTraveled = calculateDistance(
+        ride.pickup.latitude,
+        ride.pickup.longitude,
+        stopLocation.latitude,
+        stopLocation.longitude
+      );
+
+      ride.status = "COMPLETED";
+      if (!ride.tripLogs) ride.tripLogs = {};
+      ride.tripLogs.dropoffTime = new Date();
+      ride.tripLogs.endTime = new Date();
+      ride.finalDistance = actualDistanceTraveled;
+
+      if (ride.passengers) {
+        ride.passengers.forEach(p => {
+          if (p.status === "ONBOARD" || p.status === "WAITING") {
+            p.status = "DROPPED";
+          }
+        });
+      }
+
+      await ride.save();
+
+      // Broadcast completion
+      if (req.io) {
+        req.io.to(`ride_${rideId}`).emit("rideCompleted", ride);
+        req.io.to(`ride_${rideId}`).emit("earlyStopConfirmed", { ride, earlyStop: ride.earlyStop });
+      }
+
+      res.status(StatusCodes.OK).json({
+        message: "Early stop confirmed and ride completed",
+        ride,
+        earlyStop: ride.earlyStop,
+      });
+    } else {
+      // Decline - notify customer that rider wants to continue
+      if (req.io) {
+        const customerSocket = [...req.io.sockets.sockets.values()].find(
+          socket => socket.user?.id === ride.customer._id.toString()
+        );
+        if (customerSocket) {
+          customerSocket.emit("earlyStopDeclined", {
+            rideId,
+            message: "The rider has chosen to continue to the original drop-off location",
+          });
+        }
+      }
+
+      res.status(StatusCodes.OK).json({
+        message: "Early stop request declined. Continuing to original drop-off.",
+        ride,
+      });
+    }
+  } catch (error) {
+    console.error("Error responding to early stop:", error);
+    throw new BadRequestError(error.message || "Failed to respond to early stop request");
+  }
+};
+
+// ============================================
 
 export const createRide = async (req, res) => {
   const { vehicle, pickup, drop } = req.body;

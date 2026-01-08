@@ -169,6 +169,44 @@ const rideSchema = new Schema(
     // ============================================
 
     // ============================================
+    // EARLY STOP FEATURE (passenger requests to stop before drop-off)
+    // ============================================
+    earlyStop: {
+      // Whether the ride was completed early (before reaching original drop-off)
+      completedEarly: {
+        type: Boolean,
+        default: false,
+      },
+      // The actual stop location (where passenger was dropped off early)
+      location: {
+        latitude: { type: Number, default: null },
+        longitude: { type: Number, default: null },
+      },
+      // Human-readable address of the early stop location
+      address: {
+        type: String,
+        default: null,
+      },
+      // Who requested the early stop (customer or rider)
+      requestedBy: {
+        type: String,
+        enum: ["customer", "rider", null],
+        default: null,
+      },
+      // When the early stop was requested
+      requestedAt: {
+        type: Date,
+        default: null,
+      },
+      // Reason for early stop (optional)
+      reason: {
+        type: String,
+        default: null,
+      },
+    },
+    // ============================================
+
+    // ============================================
     // ROUTE LOGS (for route deviation detection, fair pricing, analytics)
     // ============================================
     routeLogs: {
