@@ -592,6 +592,125 @@ const handleSocketConnection = (io) => {
       console.log(`✅ User ${user.id} successfully left ride room ${rideId}`);
     });
 
+    // ============ GLOBAL CANCEL RIDE HANDLER ============
+    // This handles cancellation for rides in START status (before OTP verification)
+    socket.on("cancelRide", async (data) => {
+      try {
+        // Extract rideId and reason from data
+        let rideId, cancellationReason;
+        if (typeof data === 'string') {
+          rideId = data;
+          cancellationReason = null;
+        } else if (data && typeof data === 'object') {
+          rideId = data.rideId;
+          cancellationReason = data.reason || null;
+        }
+
+        if (!rideId) {
+          console.log(`❌ Cancel ride failed: No rideId provided`);
+          socket.emit("cancelRideError", { message: "No ride ID provided" });
+          return;
+        }
+
+        console.log(`🚫 User ${user.id} (${user.role}) attempting to cancel ride ${rideId}`);
+        if (cancellationReason) {
+          console.log(`📝 Cancellation reason: ${cancellationReason}`);
+        }
+
+        const ride = await Ride.findById(rideId)
+          .populate("customer", "firstName lastName phone")
+          .populate("rider", "firstName lastName phone");
+
+        if (!ride) {
+          console.log(`❌ Ride ${rideId} not found`);
+          socket.emit("cancelRideError", { message: "Ride not found" });
+          return;
+        }
+
+        // Check if user is authorized to cancel this ride
+        const isCustomer = ride.customer._id.toString() === user.id;
+        const isRider = ride.rider && ride.rider._id.toString() === user.id;
+
+        if (!isCustomer && !isRider) {
+          console.log(`❌ User ${user.id} not authorized to cancel ride ${rideId}`);
+          socket.emit("cancelRideError", { message: "Not authorized to cancel this ride" });
+          return;
+        }
+
+        // Only allow cancellation for SEARCHING_FOR_RIDER or START status (before OTP verification)
+        if (ride.status !== "SEARCHING_FOR_RIDER" && ride.status !== "START") {
+          console.log(`❌ Cannot cancel ride ${rideId} - status is ${ride.status}`);
+          socket.emit("cancelRideError", { message: `Cannot cancel ride with status: ${ride.status}. Use early stop for rides in progress.` });
+          return;
+        }
+
+        // Protect COMPLETED rides
+        if (ride.status === "COMPLETED") {
+          console.log(`🔒 Ride ${rideId} is COMPLETED - protected from cancellation`);
+          socket.emit("cancelRideError", { message: "Cannot cancel a completed ride" });
+          return;
+        }
+
+        // Determine who cancelled
+        const cancelledBy = isCustomer ? "customer" : "rider";
+        const cancellerName = isCustomer 
+          ? `${ride.customer.firstName} ${ride.customer.lastName}`
+          : `${ride.rider.firstName} ${ride.rider.lastName}`;
+
+        // Update ride status
+        ride.status = "CANCELLED";
+        ride.cancelledBy = cancelledBy;
+        ride.cancelledAt = new Date();
+        ride.cancellationReason = cancellationReason;
+        await ride.save();
+
+        console.log(`✅ Ride ${rideId} cancelled by ${cancelledBy} (${cancellerName})`);
+
+        // Broadcast to ride room
+        io.to(`ride_${rideId}`).emit("rideCanceled", {
+          message: "Ride has been cancelled",
+          ride: ride,
+          cancelledBy: cancelledBy,
+          cancellerName: cancellerName,
+          reason: cancellationReason
+        });
+
+        // Notify the other party
+        if (isCustomer && ride.rider) {
+          // Customer cancelled - notify rider
+          const riderSocket = getRiderSocket(ride.rider._id.toString());
+          if (riderSocket) {
+            console.log(`🚨 Sending cancellation alert to rider ${ride.rider._id}`);
+            riderSocket.emit("passengerCancelledRide", {
+              rideId: rideId,
+              message: `${cancellerName} has cancelled the ride`,
+              passengerName: cancellerName,
+              ride: ride,
+              reason: cancellationReason
+            });
+          }
+        } else if (isRider) {
+          // Rider cancelled - notify customer (customer is already in ride room)
+          console.log(`🚨 Rider cancelled ride ${rideId} - customer notified via ride room`);
+        }
+
+        // Remove from on-duty riders' screens
+        io.to("onDuty").emit("rideOfferCanceled", rideId);
+        io.to("onDuty").emit("rideCanceled", {
+          rideId: rideId,
+          ride: ride,
+          cancelledBy: cancelledBy,
+          cancellerName: cancellerName
+        });
+
+        console.log(`📢 Successfully cancelled ride ${rideId} and notified all parties`);
+
+      } catch (error) {
+        console.error(`❌ Error cancelling ride:`, error);
+        socket.emit("cancelRideError", { message: "Failed to cancel ride. Please try again." });
+      }
+    });
+
     // ============ CHAT SOCKET EVENTS ============
     
     // Join a chat room
